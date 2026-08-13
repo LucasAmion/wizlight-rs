@@ -1,0 +1,39 @@
+# cargo-deny configuration. Run locally with:
+#   cargo install cargo-deny && cargo deny check
+
+[advisories]
+# RustSec advisory database. Unmaintained crates are a warning, not a failure —
+# they are worth knowing about but should not block a release at 3am.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licences only. We ship MIT, so a copyleft dependency would be a
+# licence violation, not merely inconvenient.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",       # file-level copyleft; fine to link against
+    "CC0-1.0",
+    "Unlicense",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate versions of the same crate bloat the binary. Warn rather than deny:
+# in a tree this size some duplication is unavoidable and outside our control.
+multiple-versions = "warn"
+wildcards = "deny"
+# Nothing should pull in a second async runtime or TLS stack behind our backs.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

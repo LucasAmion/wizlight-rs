@@ -1,0 +1,24 @@
+# Everything is grouped into a single weekly PR per ecosystem. Ungrouped
+# Dependabot produces enough noise that people stop reading it, which defeats
+# the point.
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ['*']
+        update-types: [minor, patch]
+    # Majors arrive as individual PRs — they need reading.
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
