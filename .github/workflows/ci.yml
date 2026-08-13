@@ -63,7 +63,7 @@ jobs:
       - run: cargo doc --no-deps --all-features
 
   msrv:
-    name: MSRV (1.85)
+    name: MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
