@@ -1,0 +1,661 @@
+//! An in-process UDP bulb emulator.
+//!
+//! Speaks the real WiZ protocol on an ephemeral port so the whole test suite can
+//! run on any machine, on all three CI platforms, with no hardware and no fixed
+//! ports.
+//!
+//! # Fidelity
+//!
+//! Behaviour marked *measured* was recorded from an `ESP25_SHRGB_01` on firmware
+//! 1.38.0; the quirks are deliberate, because code written against a
+//! better-behaved fake would break on real hardware:
+//!
+//! - Setting colour, temperature or a scene turns the bulb **on**, even if it
+//!   was off, and `setState` behaves exactly like `setPilot` in this. Setting
+//!   only `dimming` does not — an off bulb ignores it completely.
+//! - An out-of-range `dimming` is **silently clamped** and still reports
+//!   success, while an out-of-range `temp` or `sceneId` is rejected with
+//!   `-32602`. The bulb cannot be trusted to validate.
+//! - Colour, colour temperature and scene are mutually exclusive: setting one
+//!   clears the others.
+//! - A `syncPilot` push can be emitted *before* the reply to the request that
+//!   caused it. Off by default; see [`MockBulb::push_before_ack`].
+//!
+//! Anything else — the `-32700` parse error, `speed`/`ratio` handling, the lower
+//! `dimming` bound — is taken from `pywizlight` or from the documented parameter
+//! ranges and has **not** been confirmed against hardware.
+//!
+//! The bulb binds `0.0.0.0`, not `127.0.0.1`: a loopback-bound socket never
+//! receives broadcast, which discovery tests depend on.
+
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use serde_json::{Map, Value, json};
+use tokio::net::UdpSocket;
+use tokio::task::JoinHandle;
+
+/// The port real bulbs push `syncPilot` updates to.
+pub const PUSH_PORT: u16 = 38900;
+/// The port real bulbs listen on.
+pub const BULB_PORT: u16 = 38899;
+
+/// A model of bulb, with the config responses that model actually returns.
+///
+/// The RGB personality is our own capture; the others are lifted from
+/// `pywizlight`'s recorded device dumps, so the harness can play hardware we do
+/// not own.
+#[derive(Clone, Copy)]
+pub struct Personality {
+    /// `moduleName` as reported by `getSystemConfig`.
+    pub module_name: &'static str,
+    /// Firmware version as reported by `getSystemConfig`.
+    pub fw_version: &'static str,
+    system_config: &'static str,
+    model_config: &'static str,
+    user_config: &'static str,
+    power: Option<&'static str>,
+}
+
+const METHOD_NOT_FOUND: &str =
+    r#"{"env":"pro","error":{"code":-32601,"message":"Method not found"}}"#;
+
+impl Personality {
+    /// `ESP25_SHRGB_01` on firmware 1.38.0 — the hardware everything else was
+    /// measured against. Full colour, 2200–6500 K.
+    pub fn rgb() -> Self {
+        Self {
+            module_name: "ESP25_SHRGB_01",
+            fw_version: "1.38.0",
+            system_config: r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"9877d5230f0a","homeId":19328771,"roomId":32205219,"rgn":"eu","moduleName":"ESP25_SHRGB_01","fwVersion":"1.38.0","groupId":0,"ping":0,"accUdpPropRate":100,"rdIdUidHash":"5f92d6b617a4c3c9e32c744f3e1cd51cbaf5c82c40213fde387838d5014dcdc3"}}"#,
+            model_config: r#"{"method":"getModelConfig","env":"pro","result":{"devTotal":1,"headTotal":1,"swHead":0,"ps":3,"hasGradient":1,"nightLightOff":0,"wifiMaxTxPower":18,"minDimLevel":10,"devices":1,"devType":0,"lightType":1,"pwmFreq":1000,"pwmRes":13,"pwmRange":[0,100],"pwmRanges":[0,1000,0,1000,0,1000,0,1000,0,1000],"wcr":80,"nowc":1,"cctRange":[2200,2700,6500,6500],"renderFactor":[255,110,140,255,0,0,40,110,140,240],"wizc1":{"mode":[0,0,0,0,0,0,0]},"wizc2":{"mode":[0,0,0,0,0,0,0]},"drvIface":4,"i2cDrv":[{"chip":"BP5768D","addr":255,"freq":200,"curr":[10,8,6,23,22],"output":[2,1,3,4,5]}],"hasCctTable":16}}"#,
+            user_config: r#"{"method":"getUserConfig","env":"pro","result":{"fadeIn":500,"fadeOut":500,"dftDim":100,"opMode":0,"po":false,"minDimming":0,"tapSensor":1,"autoUpd":1,"devices":1,"dim2WarmPoints":[[1800,1],[1800,10],[2700,50],[4200,90],[4200,100]],"wizc1":{"mode":[11,0,0,0,0,0,0],"opts":{"dim":100}},"wizc2":{"mode":[0,255,0,0,0,0,0],"opts":{"dim":100}},"apStkEn":false,"confTs":2}}"#,
+            power: None,
+        }
+    }
+
+    /// `ESP01_SHRGB_03` on 1.25.0 — an older RGB bulb whose `getModelConfig`
+    /// carries none of the fields the 1.38.0 firmware added.
+    pub fn rgb_legacy() -> Self {
+        Self {
+            module_name: "ESP01_SHRGB_03",
+            fw_version: "1.25.0",
+            system_config: r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"a8bb5006033d","homeId":653906,"roomId":989983,"moduleName":"ESP01_SHRGB_03","fwVersion":"1.25.0","groupId":0,"drvConf":[30,1],"ewf":[255,0,255,255,0,0,0],"ewfHex":"ff00ffff000000","ping":0}}"#,
+            model_config: r#"{"method":"getModelConfig","env":"pro","result":{"ps":1,"pwmFreq":1000,"pwmRange":[3,100],"wcr":30,"nowc":1,"cctRange":[2200,2700,4800,6500],"renderFactor":[171,255,75,255,43,85,0,0,0,0]}}"#,
+            user_config: METHOD_NOT_FOUND,
+            power: None,
+        }
+    }
+
+    /// `ESP14_SHTW1C_01` on 1.18.0 — tunable white. No `getModelConfig` at all,
+    /// so the Kelvin range has to come from `getUserConfig`.
+    pub fn tunable_white() -> Self {
+        Self {
+            module_name: "ESP14_SHTW1C_01",
+            fw_version: "1.18.0",
+            system_config: r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"a8bb503ea5f4","homeId":5385975,"roomId":0,"homeLock":false,"pairingLock":false,"typeId":0,"moduleName":"ESP14_SHTW1C_01","fwVersion":"1.18.0","groupId":0,"drvConf":[20,1]}}"#,
+            model_config: METHOD_NOT_FOUND,
+            user_config: r#"{"method":"getUserConfig","env":"pro","result":{"fadeIn":450,"fadeOut":500,"fadeNight":false,"dftDim":100,"pwmRange":[0,100],"whiteRange":[2700,6500],"extRange":[2700,6500],"opMode":0,"po":false}}"#,
+            power: None,
+        }
+    }
+
+    /// `ESP06_SHDW9_01` on 1.11.7 — dimmable white only.
+    pub fn dimmable_white() -> Self {
+        Self {
+            module_name: "ESP06_SHDW9_01",
+            fw_version: "1.11.7",
+            system_config: r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"a8bb509f71d1","homeId":0,"homeLock":false,"pairingLock":false,"typeId":0,"moduleName":"ESP06_SHDW9_01","fwVersion":"1.11.7","groupId":0,"drvConf":[20,1]}}"#,
+            model_config: METHOD_NOT_FOUND,
+            user_config: r#"{"method":"getUserConfig","env":"pro","result":{"fadeIn":450,"fadeOut":500,"fadeNight":false,"dftDim":100,"pwmRange":[0,100],"whiteRange":[2700,6500],"extRange":[2700,6500]}}"#,
+            power: None,
+        }
+    }
+
+    /// `ESP10_SOCKET_06` on 1.25.0 — a smart plug: on/off, no colour.
+    pub fn socket() -> Self {
+        Self {
+            module_name: "ESP10_SOCKET_06",
+            fw_version: "1.25.0",
+            system_config: r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"a8bb5006033d","homeId":653906,"roomId":989983,"moduleName":"ESP10_SOCKET_06","fwVersion":"1.25.0","groupId":0,"drvConf":[20,2],"ewf":[255,0,255,255,0,0,0],"ewfHex":"ff00ffff000000","ping":0}}"#,
+            model_config: r#"{"method":"getModelConfig","env":"pro","result":{"ps":1,"pwmFreq":200,"pwmRange":[1,100],"wcr":20,"nowc":2,"cctRange":[2700,2700,2700,2700],"renderFactor":[255,0,255,255,0,0,0,0,0,0]}}"#,
+            user_config: METHOD_NOT_FOUND,
+            power: Some(r#"{"method":"getPower","env":"pro","result":{"power":1065385}}"#),
+        }
+    }
+
+    /// `ESP20_DHRGB_01` on 1.35.0 — dual head, so `devices` matters.
+    pub fn dual_head() -> Self {
+        Self {
+            module_name: "ESP20_DHRGB_01",
+            fw_version: "1.35.0",
+            system_config: r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"444f8ec47828","homeId":653906,"roomId":989983,"moduleName":"ESP20_DHRGB_01","fwVersion":"1.35.0","groupId":0,"drvConf":[30,1],"ewf":[255,0,255,255,0,0,0],"ewfHex":"ff00ffff000000","ping":0}}"#,
+            model_config: r#"{"method":"getModelConfig","env":"pro","result":{"ps":1,"pwmFreq":2000,"pwmRange":[1,100],"wcr":20,"nowc":2,"cctRange":[2200,2700,6500,6500],"renderFactor":[255,255,170,255,0,0,42,200,255,255]}}"#,
+            user_config: METHOD_NOT_FOUND,
+            power: None,
+        }
+    }
+}
+
+/// Builds a [`MockBulb`].
+pub struct MockBulbBuilder {
+    personality: Personality,
+    mac: String,
+    port: u16,
+    push_port: u16,
+    pilot: Option<Value>,
+}
+
+impl MockBulbBuilder {
+    /// Chooses the model this bulb pretends to be.
+    pub fn personality(mut self, personality: Personality) -> Self {
+        self.personality = personality;
+        self
+    }
+
+    /// Overrides the MAC, which is how discovery de-duplicates bulbs.
+    pub fn mac(mut self, mac: &str) -> Self {
+        self.mac = mac.to_owned();
+        self
+    }
+
+    /// Binds a fixed port instead of an ephemeral one. Only worth doing for
+    /// discovery tests, which need the real 38899.
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = port;
+        self
+    }
+
+    /// Sends push updates somewhere other than the real 38900, so push tests
+    /// can bind an ephemeral port and run in parallel.
+    pub fn push_port(mut self, port: u16) -> Self {
+        self.push_port = port;
+        self
+    }
+
+    /// Replaces the initial `getPilot` state.
+    pub fn pilot(mut self, pilot: Value) -> Self {
+        self.pilot = Some(pilot);
+        self
+    }
+
+    /// Binds the socket and starts serving.
+    pub async fn start(self) -> MockBulb {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, self.port))
+            .await
+            .expect("bind mock bulb");
+        let port = socket.local_addr().expect("local_addr").port();
+        let socket = Arc::new(socket);
+
+        let pilot = self.pilot.unwrap_or_else(|| {
+            json!({
+                "mac": self.mac,
+                "rssi": -55,
+                "state": true,
+                "sceneId": 11,
+                "temp": 2700,
+                "dimming": 100,
+            })
+        });
+
+        let shared = Arc::new(Shared {
+            mac: self.mac.clone(),
+            push_port: self.push_port,
+            system_config: config(self.personality.system_config, &self.mac),
+            model_config: config(self.personality.model_config, &self.mac),
+            user_config: config(self.personality.user_config, &self.mac),
+            power: self.personality.power.map(|p| config(p, &self.mac)),
+            state: Mutex::new(State {
+                pilot: pilot.as_object().expect("pilot is an object").clone(),
+                ..State::default()
+            }),
+        });
+
+        let task = tokio::spawn(serve(Arc::clone(&socket), Arc::clone(&shared)));
+
+        MockBulb {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            mac: self.mac,
+            shared,
+            task,
+        }
+    }
+}
+
+/// A fake bulb listening on UDP.
+///
+/// Dropping it stops the server.
+pub struct MockBulb {
+    addr: SocketAddr,
+    mac: String,
+    shared: Arc<Shared>,
+    task: JoinHandle<()>,
+}
+
+impl MockBulb {
+    /// Starts a full-colour bulb on an ephemeral port.
+    pub async fn start() -> Self {
+        Self::builder().start().await
+    }
+
+    /// Starts configuring a bulb.
+    pub fn builder() -> MockBulbBuilder {
+        MockBulbBuilder {
+            personality: Personality::rgb(),
+            mac: "9877d5230f0a".to_owned(),
+            port: 0,
+            push_port: PUSH_PORT,
+            pilot: None,
+        }
+    }
+
+    /// Where to send requests. Always loopback, whatever the socket is bound to.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// The port the bulb is listening on.
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    /// The bulb's MAC.
+    pub fn mac(&self) -> &str {
+        &self.mac
+    }
+
+    /// Every datagram received, in order, exactly as it arrived on the wire.
+    pub fn requests(&self) -> Vec<String> {
+        self.shared.state.lock().unwrap().requests.clone()
+    }
+
+    /// The most recent datagram, parsed.
+    pub fn last_request(&self) -> Option<Value> {
+        self.requests()
+            .last()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+    }
+
+    /// The bulb's current state, as `getPilot` would report it.
+    pub fn pilot(&self) -> Value {
+        Value::Object(self.shared.state.lock().unwrap().pilot.clone())
+    }
+
+    /// Silently discards the next `n` datagrams, for exercising retries and
+    /// timeouts.
+    pub fn drop_next(&self, n: usize) {
+        self.shared.state.lock().unwrap().drop_next = n;
+    }
+
+    /// Answers the next `n` requests with something that is not JSON.
+    pub fn malformed_next(&self, n: usize) {
+        self.shared.state.lock().unwrap().malformed_next = n;
+    }
+
+    /// Answers the next `n` requests with this error instead of a result.
+    pub fn error_next(&self, n: usize, code: i64, message: &str) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.error_next = n;
+        state.error = (code, message.to_owned());
+    }
+
+    /// Delays every reply, for exercising timeouts and slow-bulb behaviour.
+    pub fn set_latency(&self, latency: Option<Duration>) {
+        self.shared.state.lock().unwrap().latency = latency;
+    }
+
+    /// Emits the `syncPilot` push *before* the reply to the request that caused
+    /// it — an ordering real hardware does produce.
+    pub fn push_before_ack(&self, yes: bool) {
+        self.shared.state.lock().unwrap().push_first = yes;
+    }
+
+    /// Whether a client has registered for push updates, and where they go.
+    pub fn push_target(&self) -> Option<SocketAddr> {
+        self.shared.state.lock().unwrap().push_target
+    }
+
+    /// Sends an unsolicited heartbeat push, as a real bulb does periodically.
+    /// Returns `false` if nobody has registered.
+    pub async fn push_heartbeat(&self) -> bool {
+        let Some(target) = self.push_target() else {
+            return false;
+        };
+        let msg = self.shared.sync_pilot("hb");
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+            .await
+            .expect("bind push socket");
+        socket
+            .send_to(msg.to_string().as_bytes(), target)
+            .await
+            .expect("send heartbeat");
+        true
+    }
+}
+
+impl Drop for MockBulb {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+fn config(raw: &str, mac: &str) -> Value {
+    let mut value: Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+    if let Some(result) = value.get_mut("result").and_then(Value::as_object_mut) {
+        if result.contains_key("mac") {
+            result.insert("mac".into(), json!(mac));
+        }
+    }
+    value
+}
+
+struct Shared {
+    mac: String,
+    push_port: u16,
+    system_config: Value,
+    model_config: Value,
+    user_config: Value,
+    power: Option<Value>,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    pilot: Map<String, Value>,
+    requests: Vec<String>,
+    push_target: Option<SocketAddr>,
+    drop_next: usize,
+    malformed_next: usize,
+    error_next: usize,
+    error: (i64, String),
+    latency: Option<Duration>,
+    push_first: bool,
+}
+
+/// What the bulb decided to do about one datagram.
+#[derive(Default)]
+struct Reaction {
+    latency: Option<Duration>,
+    reply: Option<Vec<u8>>,
+    push: Option<(SocketAddr, Vec<u8>)>,
+    push_first: bool,
+}
+
+async fn serve(socket: Arc<UdpSocket>, shared: Arc<Shared>) {
+    let mut buf = vec![0u8; 4096];
+    loop {
+        let Ok((n, from)) = socket.recv_from(&mut buf).await else {
+            continue;
+        };
+        let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+        let reaction = shared.react(&raw, from);
+        let socket = Arc::clone(&socket);
+        tokio::spawn(async move {
+            if let Some(latency) = reaction.latency {
+                tokio::time::sleep(latency).await;
+            }
+            let ack = async {
+                if let Some(reply) = &reaction.reply {
+                    let _ = socket.send_to(reply, from).await;
+                }
+            };
+            let push = async {
+                if let Some((target, msg)) = &reaction.push {
+                    let _ = socket.send_to(msg, *target).await;
+                }
+            };
+            if reaction.push_first {
+                push.await;
+                ack.await;
+            } else {
+                ack.await;
+                push.await;
+            }
+        });
+    }
+}
+
+impl Shared {
+    fn react(&self, raw: &str, from: SocketAddr) -> Reaction {
+        let mut state = self.state.lock().unwrap();
+        state.requests.push(raw.to_owned());
+
+        if state.drop_next > 0 {
+            state.drop_next -= 1;
+            return Reaction::default();
+        }
+        let latency = state.latency;
+        if state.malformed_next > 0 {
+            state.malformed_next -= 1;
+            return Reaction {
+                latency,
+                reply: Some(b"garbage".to_vec()),
+                ..Reaction::default()
+            };
+        }
+
+        let Ok(request) = serde_json::from_str::<Value>(raw) else {
+            return reply(latency, parse_error());
+        };
+        let Some(method) = request.get("method").and_then(Value::as_str) else {
+            return reply(latency, parse_error());
+        };
+
+        if state.error_next > 0 {
+            state.error_next -= 1;
+            let (code, message) = state.error.clone();
+            return reply(latency, error(method, code, &message));
+        }
+
+        match method {
+            "getPilot" => {
+                let result = Value::Object(state.pilot.clone());
+                reply(
+                    latency,
+                    json!({"method": "getPilot", "env": "pro", "result": result}),
+                )
+            }
+            "getSystemConfig" => reply(latency, self.system_config.clone()),
+            "getModelConfig" => reply(latency, self.model_config.clone()),
+            "getUserConfig" => reply(latency, self.user_config.clone()),
+            "getPower" => match &self.power {
+                Some(power) => reply(latency, power.clone()),
+                None => reply(latency, error(method, -32601, "Method not found")),
+            },
+            "registration" => {
+                let params = request.get("params").cloned().unwrap_or(Value::Null);
+                let register = params
+                    .get("register")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if register {
+                    let ip = params
+                        .get("phoneIp")
+                        .and_then(Value::as_str)
+                        .and_then(|ip| ip.parse::<IpAddr>().ok())
+                        .unwrap_or_else(|| from.ip());
+                    state.push_target = Some(SocketAddr::new(ip, self.push_port));
+                } else {
+                    state.push_target = None;
+                }
+                let ack = json!({
+                    "method": "registration",
+                    "env": "pro",
+                    "result": {"mac": self.mac, "success": true},
+                });
+                let push = register.then(|| self.push_from(&state, "wizc1"));
+                Reaction {
+                    latency,
+                    reply: Some(ack.to_string().into_bytes()),
+                    push: push.flatten(),
+                    push_first: state.push_first,
+                }
+            }
+            "setPilot" | "setState" => match apply(&mut state.pilot, request.get("params")) {
+                Err((code, message)) => reply(latency, error(method, code, &message)),
+                Ok(()) => {
+                    let ack = json!({
+                        "method": method,
+                        "env": "pro",
+                        "result": {"success": true},
+                    });
+                    Reaction {
+                        latency,
+                        reply: Some(ack.to_string().into_bytes()),
+                        push: self.push_from(&state, "udp"),
+                        push_first: state.push_first,
+                    }
+                }
+            },
+            other => reply(latency, error(other, -32601, "Method not found")),
+        }
+    }
+
+    fn push_from(&self, state: &State, src: &str) -> Option<(SocketAddr, Vec<u8>)> {
+        let target = state.push_target?;
+        let mut params = state.pilot.clone();
+        params.insert("devices".into(), json!(1));
+        params.insert("src".into(), json!(src));
+        if src == "hb" {
+            params.insert("mqttCd".into(), json!(0));
+            params.insert("ts".into(), json!(unix_now()));
+        }
+        let msg = json!({"method": "syncPilot", "env": "pro", "params": params});
+        Some((target, msg.to_string().into_bytes()))
+    }
+
+    fn sync_pilot(&self, src: &str) -> Value {
+        let state = self.state.lock().unwrap();
+        let mut params = state.pilot.clone();
+        params.insert("devices".into(), json!(1));
+        params.insert("src".into(), json!(src));
+        if src == "hb" {
+            params.insert("mqttCd".into(), json!(0));
+            params.insert("ts".into(), json!(unix_now()));
+        }
+        json!({"method": "syncPilot", "env": "pro", "params": params})
+    }
+}
+
+/// Applies `setPilot` params to the current state, or explains why the bulb
+/// refused.
+fn apply(pilot: &mut Map<String, Value>, params: Option<&Value>) -> Result<(), (i64, String)> {
+    let invalid = || (-32602, "Invalid params".to_owned());
+    let params = params.and_then(Value::as_object).ok_or_else(invalid)?;
+    if params.is_empty() {
+        return Err(invalid());
+    }
+
+    // Validate everything before touching the state: a rejected request must
+    // leave the bulb exactly as it was.
+    for (key, value) in params {
+        match key.as_str() {
+            "state" => {
+                value.as_bool().ok_or_else(invalid)?;
+            }
+            "r" | "g" | "b" | "c" | "w" => {
+                let v = value.as_i64().ok_or_else(invalid)?;
+                if !(0..=255).contains(&v) {
+                    return Err(invalid());
+                }
+            }
+            // Measured: 200 comes back as success and is clamped to 100.
+            "dimming" => {
+                value.as_i64().ok_or_else(invalid)?;
+            }
+            "temp" => {
+                let v = value.as_i64().ok_or_else(invalid)?;
+                if !(1000..=10_000).contains(&v) {
+                    return Err(invalid());
+                }
+            }
+            "sceneId" => {
+                let v = value.as_i64().ok_or_else(invalid)?;
+                if !(0..=32).contains(&v) && v != 1000 {
+                    return Err(invalid());
+                }
+            }
+            // Not measured; passed through unvalidated rather than guessed at.
+            _ => {}
+        }
+    }
+
+    let colour = ["r", "g", "b", "c", "w"];
+    let lit = pilot.get("state").and_then(Value::as_bool).unwrap_or(false);
+    let activating = colour.iter().any(|k| params.contains_key(*k))
+        || params.contains_key("temp")
+        || params.contains_key("sceneId");
+
+    // Measured: a bulb that is off ignores anything that does not either name a
+    // new state or imply one. `{"dimming":55}` sent to an off bulb reports
+    // success and changes nothing at all — not even the stored brightness.
+    if !lit && !activating && !params.contains_key("state") {
+        return Ok(());
+    }
+    // Measured: colour, temperature and scene all switch the bulb on.
+    if activating {
+        pilot.insert("state".into(), json!(true));
+    }
+
+    if colour.iter().any(|k| params.contains_key(*k)) {
+        pilot.remove("temp");
+        pilot.insert("sceneId".into(), json!(0));
+        for key in colour {
+            pilot.entry(key.to_string()).or_insert(json!(0));
+        }
+    }
+    if params.contains_key("temp") {
+        for key in colour {
+            pilot.remove(key);
+        }
+        pilot.insert("sceneId".into(), json!(0));
+    }
+    if let Some(scene) = params.get("sceneId").and_then(Value::as_i64) {
+        if scene != 0 {
+            for key in colour {
+                pilot.remove(key);
+            }
+            pilot.remove("temp");
+        }
+    }
+
+    for (key, value) in params {
+        let value = if key == "dimming" {
+            json!(value.as_i64().unwrap_or(100).clamp(1, 100))
+        } else {
+            value.clone()
+        };
+        pilot.insert(key.clone(), value);
+    }
+    Ok(())
+}
+
+fn reply(latency: Option<Duration>, body: Value) -> Reaction {
+    Reaction {
+        latency,
+        reply: Some(body.to_string().into_bytes()),
+        ..Reaction::default()
+    }
+}
+
+fn error(method: &str, code: i64, message: &str) -> Value {
+    json!({
+        "method": method,
+        "env": "pro",
+        "error": {"code": code, "message": message},
+    })
+}
+
+/// The bulb's answer to something that is not a request at all. Taken from
+/// `pywizlight`; not confirmed against hardware.
+fn parse_error() -> Value {
+    json!({"env": "pro", "error": {"code": -32700, "message": "Parse error"}})
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
