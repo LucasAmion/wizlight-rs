@@ -168,35 +168,63 @@ async fn a_reply_that_is_not_json_is_an_error() {
 
 #[tokio::test]
 async fn a_method_the_firmware_lacks_is_not_supported() {
-    // Measured: only the socket personality answers getPower.
+    // Measured: the bulb answers getWifiConfig with -32601, same as any method
+    // it has never heard of.
     let bulb = MockBulb::start().await;
     let client = connect(&bulb).await;
 
     let error = client
-        .request(&Request::new("getPower"))
+        .request(&Request::new("getWifiConfig"))
         .await
-        .expect_err("bulbs do not report power");
+        .expect_err("no such method on this firmware");
 
     match error {
-        Error::NotSupported { method } => assert_eq!(method, "getPower"),
+        Error::NotSupported { method } => assert_eq!(method, "getWifiConfig"),
         other => panic!("expected NotSupported, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn the_socket_personality_does_answer_get_power() {
+async fn a_model_without_the_method_at_all_says_so() {
     let bulb = MockBulb::builder()
-        .personality(Personality::socket())
+        .personality(Personality::tunable_white())
         .start()
         .await;
     let client = connect(&bulb).await;
 
+    let error = client
+        .request(&Request::new("getPower"))
+        .await
+        .expect_err("older firmware has no getPower");
+
+    assert!(
+        matches!(error, Error::NotSupported { .. }),
+        "expected NotSupported, got {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn power_is_answered_by_models_that_implement_it() {
+    let socket = MockBulb::builder()
+        .personality(Personality::socket())
+        .start()
+        .await;
+    let client = connect(&socket).await;
     let response = client
         .request(&Request::new("getPower"))
         .await
         .expect("getPower");
-
     assert_eq!(response.result.expect("result")["power"], 1_065_385);
+
+    // Measured: the RGB bulb answers too, always with 0. The method existing
+    // and the meter existing are different things.
+    let bulb = MockBulb::start().await;
+    let client = connect(&bulb).await;
+    let response = client
+        .request(&Request::new("getPower"))
+        .await
+        .expect("getPower");
+    assert_eq!(response.result.expect("result")["power"], 0);
 }
 
 #[tokio::test]

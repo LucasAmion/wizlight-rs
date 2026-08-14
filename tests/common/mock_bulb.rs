@@ -20,10 +20,17 @@
 //!   clears the others.
 //! - A `syncPilot` push can be emitted *before* the reply to the request that
 //!   caused it. Off by default; see [`MockBulb::push_before_ack`].
+//! - A `setPilot` with **no `params` key** is `-32602`, while one with an
+//!   **empty `params` object** is `-32600` — a different code for what looks
+//!   like the same mistake.
+//! - Garbage that is not JSON draws `-32700`, in a reply with no `method`.
+//! - `getPower` is **not socket-only**: the RGB personality answers it, always
+//!   with `0`, whatever the bulb is doing.
 //!
-//! Anything else — the `-32700` parse error, `speed`/`ratio` handling, the lower
-//! `dimming` bound — is taken from `pywizlight` or from the documented parameter
-//! ranges and has **not** been confirmed against hardware.
+//! Anything else — `speed`/`ratio` handling, the lower `dimming` bound, and the
+//! config responses of the five models we do not own — is taken from
+//! `pywizlight` or from the documented parameter ranges and has **not** been
+//! confirmed against hardware.
 //!
 //! The bulb binds `0.0.0.0`, not `127.0.0.1`: a loopback-bound socket never
 //! receives broadcast, which discovery tests depend on.
@@ -71,7 +78,10 @@ impl Personality {
             system_config: r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"9877d5230f0a","homeId":19328771,"roomId":32205219,"rgn":"eu","moduleName":"ESP25_SHRGB_01","fwVersion":"1.38.0","groupId":0,"ping":0,"accUdpPropRate":100,"rdIdUidHash":"5f92d6b617a4c3c9e32c744f3e1cd51cbaf5c82c40213fde387838d5014dcdc3"}}"#,
             model_config: r#"{"method":"getModelConfig","env":"pro","result":{"devTotal":1,"headTotal":1,"swHead":0,"ps":3,"hasGradient":1,"nightLightOff":0,"wifiMaxTxPower":18,"minDimLevel":10,"devices":1,"devType":0,"lightType":1,"pwmFreq":1000,"pwmRes":13,"pwmRange":[0,100],"pwmRanges":[0,1000,0,1000,0,1000,0,1000,0,1000],"wcr":80,"nowc":1,"cctRange":[2200,2700,6500,6500],"renderFactor":[255,110,140,255,0,0,40,110,140,240],"wizc1":{"mode":[0,0,0,0,0,0,0]},"wizc2":{"mode":[0,0,0,0,0,0,0]},"drvIface":4,"i2cDrv":[{"chip":"BP5768D","addr":255,"freq":200,"curr":[10,8,6,23,22],"output":[2,1,3,4,5]}],"hasCctTable":16}}"#,
             user_config: r#"{"method":"getUserConfig","env":"pro","result":{"fadeIn":500,"fadeOut":500,"dftDim":100,"opMode":0,"po":false,"minDimming":0,"tapSensor":1,"autoUpd":1,"devices":1,"dim2WarmPoints":[[1800,1],[1800,10],[2700,50],[4200,90],[4200,100]],"wizc1":{"mode":[11,0,0,0,0,0,0],"opts":{"dim":100}},"wizc2":{"mode":[0,255,0,0,0,0,0],"opts":{"dim":100}},"apStkEn":false,"confTs":2}}"#,
-            power: None,
+            // Measured: this model implements getPower and its meter does not.
+            // Zero at full brightness, zero dimmed, zero switched off — so the
+            // method answering says nothing about the number being usable.
+            power: Some(r#"{"method":"getPower","env":"pro","result":{"power":0}}"#),
         }
     }
 
@@ -551,8 +561,11 @@ impl Shared {
 fn apply(pilot: &mut Map<String, Value>, params: Option<&Value>) -> Result<(), (i64, String)> {
     let invalid = || (-32602, "Invalid params".to_owned());
     let params = params.and_then(Value::as_object).ok_or_else(invalid)?;
+    // Measured: an absent `params` key and an empty one are not the same
+    // request. `{"method":"setPilot"}` is invalid *params*; adding `"params":{}`
+    // makes it an invalid *request*.
     if params.is_empty() {
-        return Err(invalid());
+        return Err((-32600, "Invalid Request".to_owned()));
     }
 
     // Validate everything before touching the state: a rejected request must
@@ -655,8 +668,8 @@ fn error(method: &str, code: i64, message: &str) -> Value {
     })
 }
 
-/// The bulb's answer to something that is not a request at all. Taken from
-/// `pywizlight`; not confirmed against hardware.
+/// The bulb's answer to something that is not a request at all. Measured: the
+/// reply carries no `method`, because it never got far enough to find one.
 fn parse_error() -> Value {
     json!({"env": "pro", "error": {"code": -32700, "message": "Parse error"}})
 }

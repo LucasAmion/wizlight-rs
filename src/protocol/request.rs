@@ -9,8 +9,12 @@ use crate::error::Result;
 ///
 /// `params` is always sent, as an empty object when there is nothing to say —
 /// that is what the official app does (`{"method":"getPilot","params":{}}` in
-/// the recorded traffic), and whether the bulb accepts a request without the
-/// key at all has not been tested.
+/// the recorded traffic). Reads do not care either way; writes very much do,
+/// and not in the direction you would guess: a `setPilot` with no `params` key
+/// is refused with `-32602 Invalid params`, while the same request carrying
+/// `"params":{}` is refused with `-32600 Invalid Request`. Both are meaningless
+/// requests, so neither is worth building, but it does mean the two spellings
+/// are not interchangeable.
 ///
 /// There is deliberately no envelope-level `id`. The one `id` in the protocol
 /// belongs to `registration`'s params, and no reply ever echoes it back, so it
