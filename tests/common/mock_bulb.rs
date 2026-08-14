@@ -201,13 +201,13 @@ impl MockBulbBuilder {
 
         let shared = Arc::new(Shared {
             mac: self.mac.clone(),
-            push_port: self.push_port,
             system_config: config(self.personality.system_config, &self.mac),
             model_config: config(self.personality.model_config, &self.mac),
             user_config: config(self.personality.user_config, &self.mac),
             power: self.personality.power.map(|p| config(p, &self.mac)),
             state: Mutex::new(State {
                 pilot: pilot.as_object().expect("pilot is an object").clone(),
+                push_port: self.push_port,
                 ..State::default()
             }),
         });
@@ -311,6 +311,13 @@ impl MockBulb {
         self.shared.state.lock().unwrap().push_first = yes;
     }
 
+    /// Redirects pushes to another port after the bulb has started, for tests
+    /// that only learn the client's port once it exists. Takes effect at the
+    /// next registration.
+    pub fn set_push_port(&self, port: u16) {
+        self.shared.state.lock().unwrap().push_port = port;
+    }
+
     /// Whether a client has registered for push updates, and where they go.
     pub fn push_target(&self) -> Option<SocketAddr> {
         self.shared.state.lock().unwrap().push_target
@@ -352,7 +359,6 @@ fn config(raw: &str, mac: &str) -> Value {
 
 struct Shared {
     mac: String,
-    push_port: u16,
     system_config: Value,
     model_config: Value,
     user_config: Value,
@@ -365,6 +371,7 @@ struct State {
     pilot: Map<String, Value>,
     requests: Vec<String>,
     push_target: Option<SocketAddr>,
+    push_port: u16,
     drop_next: usize,
     malformed_next: usize,
     error_next: usize,
@@ -475,7 +482,8 @@ impl Shared {
                         .and_then(Value::as_str)
                         .and_then(|ip| ip.parse::<IpAddr>().ok())
                         .unwrap_or_else(|| from.ip());
-                    state.push_target = Some(SocketAddr::new(ip, self.push_port));
+                    let push_port = state.push_port;
+                    state.push_target = Some(SocketAddr::new(ip, push_port));
                 } else {
                     state.push_target = None;
                 }
