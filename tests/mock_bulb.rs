@@ -114,8 +114,15 @@ async fn rejects_unknown_methods_and_missing_params() {
     assert_eq!(unknown["error"]["code"], -32601);
     assert_eq!(unknown["method"], "noSuchMethod");
 
+    // Measured: the two ways of saying "no params" draw different codes.
     let bare = client.ask(bulb.addr(), json!({"method": "setPilot"})).await;
-    assert_eq!(bare["error"]["code"], -32602);
+    assert_eq!(bare["error"]["code"], -32602, "no params key");
+
+    let empty = client
+        .ask(bulb.addr(), json!({"method": "setPilot", "params": {}}))
+        .await;
+    assert_eq!(empty["error"]["code"], -32600, "empty params object");
+    assert_eq!(empty["error"]["message"], "Invalid Request");
 }
 
 #[tokio::test]
@@ -495,9 +502,13 @@ async fn personalities_report_their_own_hardware() {
 }
 
 #[tokio::test]
-async fn only_some_hardware_reports_power() {
+async fn power_reporting_is_per_model() {
     let socket = MockBulb::builder()
         .personality(Personality::socket())
+        .start()
+        .await;
+    let older = MockBulb::builder()
+        .personality(Personality::tunable_white())
         .start()
         .await;
     let bulb = MockBulb::start().await;
@@ -507,8 +518,13 @@ async fn only_some_hardware_reports_power() {
     let from_socket = client.ask(socket.addr(), request.clone()).await;
     assert_eq!(from_socket["result"]["power"], 1065385);
 
-    let from_bulb = client.ask(bulb.addr(), request).await;
-    assert_eq!(from_bulb["error"]["code"], -32601);
+    // Measured on an ESP25_SHRGB_01: it answers, and the answer is always 0.
+    // Treating "answers getPower" as "reports power" would be wrong.
+    let from_bulb = client.ask(bulb.addr(), request.clone()).await;
+    assert_eq!(from_bulb["result"]["power"], 0);
+
+    let from_older = client.ask(older.addr(), request).await;
+    assert_eq!(from_older["error"]["code"], -32601);
 }
 
 #[tokio::test]
