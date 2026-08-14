@@ -3,11 +3,12 @@
 //! The crate has no transport of its own yet, and even once it does the harness
 //! tests want to drive the wire directly rather than through it.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use serde_json::Value;
 use tokio::net::UdpSocket;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 /// The default patience for a reply. Generous, because CI is slow.
@@ -69,6 +70,49 @@ impl Client {
             .ok()?;
         let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
         Some(serde_json::from_str(&raw).unwrap_or(Value::String(raw)))
+    }
+}
+
+/// Something on the network that is not a bulb: answers every datagram with
+/// the same fixed bytes, whatever it was asked.
+///
+/// Discovery has to survive the rest of the subnet — another protocol's service
+/// announcement, a device that answers with nonsense — and the only way to test
+/// that is to put one there.
+pub struct Responder {
+    addr: SocketAddr,
+    task: JoinHandle<()>,
+}
+
+impl Responder {
+    /// Starts one on an ephemeral port.
+    pub async fn replying_with(reply: &str) -> Self {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind responder");
+        let port = socket.local_addr().expect("local_addr").port();
+        let reply = reply.to_owned();
+        let task = tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            while let Ok((_, from)) = socket.recv_from(&mut buf).await {
+                let _ = socket.send_to(reply.as_bytes(), from).await;
+            }
+        });
+        Self {
+            addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            task,
+        }
+    }
+
+    /// Where to send it something.
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl Drop for Responder {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 

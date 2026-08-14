@@ -8,14 +8,14 @@ It is a port of the parts of [`pywizlight`][pywizlight] that matter for
 real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
-> **Status: early development.** The request/response transport is in; the rest
-> of the list below is not, and the CLI has no commands yet. The API is unstable
-> until `0.1.0` is published.
+> **Status: early development.** The request/response transport and discovery
+> are in; the rest of the list below is not, and the CLI has no commands yet.
+> The API is unstable until `0.1.0` is published.
 
 ## Planned scope
 
-- Discovery by UDP broadcast, with the broadcast address detected from the local
-  interfaces rather than hardcoded
+- ~~Discovery by UDP broadcast~~ — done, though the CLI does not yet detect the
+  broadcast address from the local interfaces
 - `getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
   requests and responses
 - Bulb model parsing: capabilities, scene support and Kelvin range
@@ -44,6 +44,24 @@ async fn main() -> Result<(), wizlight::Error> {
     let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
     let pilot = bulb.request(&Request::new("getPilot")).await?;
     println!("{:?}", pilot.result);
+    Ok(())
+}
+```
+
+Bulbs are found by broadcasting, and reported as they answer rather than in a
+batch at the end — a discovery run keeps re-broadcasting, so a bulb switched on
+halfway through is still found:
+
+```rust,no_run
+use std::time::Duration;
+
+use wizlight::Discovery;
+
+#[tokio::main]
+async fn main() -> Result<(), wizlight::Error> {
+    for bulb in Discovery::new().collect(Duration::from_secs(5)).await? {
+        println!("{} at {}", bulb.mac, bulb.addr);
+    }
     Ok(())
 }
 ```
