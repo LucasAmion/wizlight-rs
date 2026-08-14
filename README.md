@@ -8,8 +8,9 @@ It is a port of the parts of [`pywizlight`][pywizlight] that matter for
 real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
-> **Status: early development.** Nothing below is implemented yet and the API
-> is unstable until `0.1.0` is published.
+> **Status: early development.** The request/response transport is in; the rest
+> of the list below is not, and the CLI has no commands yet. The API is unstable
+> until `0.1.0` is published.
 
 ## Planned scope
 
@@ -33,17 +34,25 @@ wizlight = { version = "0.1", default-features = false }
 that `cargo install wizlight` produces a working binary, and it pulls in `clap`,
 `anyhow` and `tracing-subscriber`. Library consumers do not want any of those.
 
-```rust,ignore
-use wizlight::Bulb;
+```rust,no_run
+use std::net::{IpAddr, Ipv4Addr};
+
+use wizlight::{Bulb, Request};
 
 #[tokio::main]
 async fn main() -> Result<(), wizlight::Error> {
-    for bulb in wizlight::discover().await? {
-        println!("{} at {}", bulb.mac(), bulb.addr());
-    }
+    let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
+    let pilot = bulb.request(&Request::new("getPilot")).await?;
+    println!("{:?}", pilot.result);
     Ok(())
 }
 ```
+
+Requests are retried and paced to what the hardware can actually absorb: three
+attempts, each given 500 ms to be answered, and no two datagrams closer together
+than 20 ms — so an unreachable bulb fails in under two seconds. See
+[`RetryPolicy`](https://docs.rs/wizlight/latest/wizlight/struct.RetryPolicy.html)
+to change that.
 
 ## CLI
 
