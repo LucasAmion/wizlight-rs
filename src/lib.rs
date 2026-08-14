@@ -12,7 +12,9 @@ pub mod protocol;
 pub mod cli;
 
 pub use bulb::{Bulb, PORT};
-pub use discovery::{BROADCAST, DEFAULT_INTERVAL, Discovered, Discovery, DiscoveryStream};
+pub use discovery::{
+    BROADCAST, DEFAULT_INTERVAL, DEFAULT_WAIT, Discovered, Discovery, DiscoveryStream,
+};
 pub use error::{Error, Result};
 pub use protocol::{DeviceError, Request, Response};
 pub use transport::RetryPolicy;

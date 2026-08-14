@@ -13,7 +13,7 @@ use common::udp::Responder;
 use futures_util::StreamExt;
 use serde_json::Value;
 use tokio::time::timeout;
-use wizlight::{BROADCAST, DEFAULT_INTERVAL, Discovery, PORT, RetryPolicy};
+use wizlight::{BROADCAST, DEFAULT_INTERVAL, DEFAULT_WAIT, Discovery, PORT, RetryPolicy};
 
 /// Long enough for a loopback round trip on a loaded CI runner, short enough
 /// that a suite of these stays quick.
@@ -170,6 +170,24 @@ async fn a_bulb_that_moved_keeps_its_identity() {
 }
 
 #[tokio::test]
+async fn a_bulb_that_ignores_broadcasts_is_still_found() {
+    // Measured: one of the two ESP25_SHRGB_01 answers broadcasts in bursts,
+    // going deaf for up to four consecutive seconds while answering unicast
+    // requests with no loss at all. Re-broadcasting is not belt and braces.
+    let bulb = MockBulb::start().await;
+    bulb.drop_next(3);
+
+    let found = discovery()
+        .target(bulb.addr())
+        .collect(WAIT)
+        .await
+        .expect("discover");
+
+    assert_eq!(found.len(), 1, "three ignored broadcasts lost the bulb");
+    assert_eq!(found[0].mac, bulb.mac());
+}
+
+#[tokio::test]
 async fn bulbs_are_reported_as_they_answer() {
     // The reason discovery streams at all: a bulb plugged in halfway through a
     // scan is found by a later broadcast, and the caller hears about it then
@@ -215,6 +233,9 @@ async fn dropping_the_stream_stops_the_broadcasts() {
         .expect("discover");
     tokio::time::sleep(INTERVAL * 2).await;
     drop(stream);
+    // Let the last broadcast land before counting, or it lands afterwards and
+    // looks like one that should not have been sent.
+    tokio::time::sleep(INTERVAL / 2).await;
     let sent = bulb.requests().len();
 
     tokio::time::sleep(INTERVAL * 4).await;
@@ -273,4 +294,6 @@ async fn the_defaults_are_the_broadcast_address_and_one_second() {
     assert_eq!(BROADCAST.to_string(), "255.255.255.255:38899");
     assert_eq!(BROADCAST.port(), PORT);
     assert_eq!(DEFAULT_INTERVAL, Duration::from_secs(1));
+    // Long enough to outlast the longest run of ignored broadcasts measured.
+    assert!(DEFAULT_WAIT >= DEFAULT_INTERVAL * 5);
 }

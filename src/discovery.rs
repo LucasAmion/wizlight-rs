@@ -32,6 +32,16 @@ pub const BROADCAST: SocketAddr =
 /// How often the registration goes out again, absent [`Discovery::interval`].
 pub const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 
+/// A sensible span to run [`Discovery::collect`] for.
+///
+/// Measured, not inherited — though it agrees with `pywizlight`'s five seconds.
+/// Over 20 broadcasts a second apart to two `ESP25_SHRGB_01` on 1.38.0, one
+/// answered 19 and the other 11, the misses falling in runs of up to four
+/// consecutive broadcasts. Both answer *unicast* requests with no loss at all,
+/// so this is broadcast reception specifically, and it is why a scan shorter
+/// than about five seconds will sooner or later come back a bulb short.
+pub const DEFAULT_WAIT: Duration = Duration::from_secs(5);
+
 /// The `phoneIp` sent when the local address cannot be worked out.
 ///
 /// It does not matter what it says. `register: false` tells the bulb to *drop*
@@ -95,13 +105,16 @@ impl Discovered {
 ///
 /// # Why it keeps broadcasting
 ///
-/// A single broadcast is not enough. UDP broadcast is unreliable by nature, a
-/// bulb that was mid-reboot never hears it, and one plugged in a second later
-/// never hears it either — so the registration goes out again every
-/// [`interval`](Discovery::interval) for as long as the run lasts. That is also
-/// why answers are [streamed](Discovery::stream) rather than returned in a
-/// batch: a UI lists bulbs as they arrive instead of showing nothing for five
-/// seconds.
+/// A single broadcast is not enough, and not by a small margin: one of the two
+/// bulbs this was measured against ignores broadcasts in runs of up to four
+/// seconds at a time while answering unicast requests perfectly — see
+/// [`DEFAULT_WAIT`]. A bulb mid-reboot hears nothing either, and one plugged in
+/// a second from now has not heard anything yet. So the registration goes out
+/// again every [`interval`](Discovery::interval) for as long as the run lasts.
+///
+/// That is also why answers are [streamed](Discovery::stream) rather than
+/// returned in a batch: a UI lists bulbs as they arrive instead of showing
+/// nothing for five seconds.
 #[derive(Clone, Debug)]
 pub struct Discovery {
     targets: Vec<SocketAddr>,
