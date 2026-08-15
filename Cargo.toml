@@ -11,6 +11,10 @@ description = "Async client for Philips WiZ smart bulbs over the local UDP proto
 authors = ["Lucas Amion"]
 license = "MIT"
 readme = "README.md"
+# Repository infrastructure is meaningless to someone vendoring the crate. The
+# test suite stays in: it is small, and the mock bulb it drives is the only
+# executable description of the protocol we have.
+exclude = [".github/", ".gitignore", "deny.toml"]
 repository = "https://github.com/LucasAmion/wizlight-rs"
 homepage = "https://github.com/LucasAmion/wizlight-rs"
 documentation = "https://docs.rs/wizlight"
