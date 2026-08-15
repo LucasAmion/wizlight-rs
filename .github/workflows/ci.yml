@@ -73,7 +73,11 @@ jobs:
       # cargo-hack reads rust-version from Cargo.toml, so the MSRV lives in one
       # place. This is the approach the Cargo book recommends.
       # https://doc.rust-lang.org/cargo/guide/continuous-integration.html#verifying-rust-version
-      - run: cargo hack check --rust-version --workspace --all-targets --ignore-private
+      #
+      # --each-feature checks every feature configuration rather than only the
+      # default one, so `--no-default-features` — how library consumers depend
+      # on the crate — is covered too.
+      - run: cargo hack check --rust-version --each-feature --workspace --all-targets --ignore-private
 
   # Packaging problems (missing metadata, files excluded from the tarball,
   # unpublishable path deps) only surface at `cargo publish` time otherwise —
