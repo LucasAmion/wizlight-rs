@@ -14,8 +14,10 @@ real-time control, and it is the protocol layer underneath
 > tells you so. The API will change without warning until `0.1.0`.
 >
 > Alphas are published to keep the release path exercised rather than to be
-> depended on. Cargo will not select one unless you ask for it by name, so
-> `wizlight = "0.1"` resolves to nothing until `0.1.0` is out.
+> depended on, so **every version below has to be spelled out in full**. Cargo
+> does not match a prerelease against an ordinary requirement: `wizlight = "0.1"`
+> resolves to nothing, and plain `cargo install wizlight` fails, until `0.1.0`
+> is out.
 
 ## Planned scope
 
@@ -82,9 +84,22 @@ to change that.
 
 ## CLI — not implemented yet
 
-`cargo install wizlight` already works, but the binary it produces has no
-commands and exits with an error saying so. It ships in the alphas only so that
-packaging and installation are tested before the commands arrive.
+The binary installs and runs, but it has no commands: it prints an explanation
+and exits non-zero. It ships in the alphas only so that packaging and
+installation are tested before the commands arrive.
+
+Installing it needs the version spelled out. `cargo install` resolves `*`, and
+`*` does not match a prerelease, so the bare form fails outright rather than
+finding the alpha:
+
+```console
+$ cargo install wizlight
+error: could not find `wizlight` in registry `crates-io` with version `*`
+
+$ cargo install wizlight --version 0.1.0-alpha.1
+```
+
+Plain `cargo install wizlight` starts working when `0.1.0` ships.
 
 The shape it is being built towards:
 
