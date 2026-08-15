@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.1] — 2026-08-14
+
+First published version. It is an alpha in the literal sense: the protocol
+surface is a third built, the CLI is a stub, and every public item may still be
+renamed. It is on crates.io so that the release workflow, trusted publishing and
+the docs.rs build are proven on something disposable rather than on `0.1.0`.
+
+Cargo does not resolve prereleases from an ordinary requirement, so this version
+is only reachable by asking for `0.1.0-alpha.1` exactly.
+
 ### Added
 
 - Crate skeleton: package metadata, MSRV 1.85 and the `cli` feature layout.
@@ -16,5 +26,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unknown fields are ignored.
 - `Error`, a typed error for each way an exchange can fail, and `RetryPolicy`,
   which configures how hard `request()` tries.
+- `Discovery`: bulbs are found by repeated UDP broadcast and reported as they
+  answer, deduplicated by MAC.
 
-[Unreleased]: https://github.com/LucasAmion/wizlight-rs/commits/main/
+### Known gaps
+
+- No typed `getPilot` / `setPilot`; requests are built from raw method names.
+- No bulb model parsing, scene tables or RGB ↔ RGB+CW conversion.
+- No streaming path and no `syncPilot` push listener.
+- The `wizlight` binary installs and runs, but has no commands and exits with an
+  error explaining that.
+
+[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.1...HEAD
+[0.1.0-alpha.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.1

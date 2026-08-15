@@ -1,6 +1,9 @@
 [package]
 name = "wizlight"
-version = "0.1.0"
+# Alphas until the M1 surface is complete. Publishing them keeps the release
+# workflow, crates.io trusted publishing and the docs.rs build exercised, none
+# of which can be set up or tested before the crate exists.
+version = "0.1.0-alpha.1"
 edition = "2024"
 # Floor is set by clap 4.6 and by edition 2024; both need 1.85.
 rust-version = "1.85"
@@ -8,6 +11,10 @@ description = "Async client for Philips WiZ smart bulbs over the local UDP proto
 authors = ["Lucas Amion"]
 license = "MIT"
 readme = "README.md"
+# Repository infrastructure is meaningless to someone vendoring the crate. The
+# test suite stays in: it is small, and the mock bulb it drives is the only
+# executable description of the protocol we have.
+exclude = [".github/", ".gitignore", "deny.toml"]
 repository = "https://github.com/LucasAmion/wizlight-rs"
 homepage = "https://github.com/LucasAmion/wizlight-rs"
 documentation = "https://docs.rs/wizlight"
