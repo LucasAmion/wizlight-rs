@@ -8,9 +8,14 @@ It is a port of the parts of [`pywizlight`][pywizlight] that matter for
 real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
-> **Status: early development.** The request/response transport and discovery
-> are in; the rest of the list below is not, and the CLI has no commands yet.
-> The API is unstable until `0.1.0` is published.
+> **Status: early development, and the published versions are alphas.** The
+> request/response transport and discovery are in; the rest of the list below
+> is not, and **the CLI has no commands yet** — the binary installs and then
+> tells you so. The API will change without warning until `0.1.0`.
+>
+> Alphas are published to keep the release path exercised rather than to be
+> depended on. Cargo will not select one unless you ask for it by name, so
+> `wizlight = "0.1"` resolves to nothing until `0.1.0` is out.
 
 ## Planned scope
 
@@ -27,8 +32,11 @@ real-time control, and it is the protocol layer underneath
 
 ```toml
 [dependencies]
-wizlight = { version = "0.1", default-features = false }
+wizlight = { version = "0.1.0-alpha.1", default-features = false }
 ```
+
+The prerelease has to be spelled out in full: a plain `"0.1"` requirement does
+not match `0.1.0-alpha.1`, and will keep doing nothing until `0.1.0` ships.
 
 **`default-features = false` matters.** The `cli` feature is on by default so
 that `cargo install wizlight` produces a working binary, and it pulls in `clap`,
@@ -72,18 +80,23 @@ than 20 ms — so an unreachable bulb fails in under two seconds. See
 [`RetryPolicy`](https://docs.rs/wizlight/latest/wizlight/struct.RetryPolicy.html)
 to change that.
 
-## CLI
+## CLI — not implemented yet
+
+`cargo install wizlight` already works, but the binary it produces has no
+commands and exits with an error saying so. It ships in the alphas only so that
+packaging and installation are tested before the commands arrive.
+
+The shape it is being built towards:
 
 ```console
-$ cargo install wizlight
 $ wizlight discover
 $ wizlight status 192.168.1.42
 $ wizlight on 192.168.1.42 --rgb 255,80,0 --brightness 60
 $ wizlight watch --all
 ```
 
-Every command takes `--json` for scripting, and `<target>` accepts either an IP
-address or a MAC (resolved through discovery).
+Every command will take `--json` for scripting, and `<target>` will accept
+either an IP address or a MAC (resolved through discovery).
 
 ## Compatibility
 
