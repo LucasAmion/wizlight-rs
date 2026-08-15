@@ -74,16 +74,9 @@ jobs:
       # place. This is the approach the Cargo book recommends.
       # https://doc.rust-lang.org/cargo/guide/continuous-integration.html#verifying-rust-version
       #
-      # --each-feature widens this to every feature configuration, not just the
-      # default one, so the job is really "compiles at the MSRV however it is
-      # built". Without it, `--no-default-features` is checked by nothing: when
-      # a crate's headline feature is on by default, the library-only build that
-      # downstream consumers actually use can break without a job going red.
-      #
-      # This is deliberately folded into the existing job rather than added as a
-      # new one. A new job means a new required status check, and the job name
-      # stays `MSRV` regardless — renaming a required check silently stops it
-      # reporting and leaves every PR waiting on a status that never arrives.
+      # --each-feature checks every feature configuration rather than only the
+      # default one, so `--no-default-features` — how library consumers depend
+      # on the crate — is covered too.
       - run: cargo hack check --rust-version --each-feature --workspace --all-targets --ignore-private
 
   # Packaging problems (missing metadata, files excluded from the tarball,
