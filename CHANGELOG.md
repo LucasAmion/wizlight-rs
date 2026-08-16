@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Typed pilot surface: `PilotBuilder`, validated newtypes (`Channel`, `Dimming`,
+  `Kelvin`, `Speed`, `Ratio`, `SceneId`, `Devices`), and `Pilot` /
+  `Success` result types.
+- Typed config results: `SystemConfig`, `ModelConfig`, `UserConfig`, `Power`.
+- `Bulb` methods for `get_pilot`, `set_pilot`, `set_state`, `get_system_config`,
+  `get_model_config`, `get_user_config`, `get_power`, `reboot`, `reset`, and a
+  `kelvin_range` helper that falls back from `getModelConfig` to `getUserConfig`
+  on older firmware.
+
+### Known gaps
+
+- No bulb model / capability parsing beyond the raw config structs, and no scene
+  tables yet.
+- No RGB ↔ RGB+CW conversion.
+- No streaming path and no `syncPilot` push listener.
+- The `wizlight` binary still stubs the command runner.
+
 ## [0.1.0-alpha.1] — 2026-08-14
 
 First published version. It is an alpha in the literal sense: the protocol

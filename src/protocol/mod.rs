@@ -18,8 +18,14 @@
 //! `deny_unknown_fields` anywhere in the parse path would turn a firmware
 //! update into a broken client.
 
+mod config;
+mod pilot;
 mod request;
 mod response;
+mod types;
 
+pub use config::{ModelConfig, Power, SystemConfig, UserConfig};
+pub use pilot::{Pilot, PilotBuilder, PilotParams, Success};
 pub use request::Request;
 pub use response::{DeviceError, Response};
+pub use types::{Channel, Devices, Dimming, Kelvin, Ratio, SceneId, Speed};

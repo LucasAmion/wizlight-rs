@@ -16,5 +16,8 @@ pub use discovery::{
     BROADCAST, DEFAULT_INTERVAL, DEFAULT_WAIT, Discovered, Discovery, DiscoveryStream,
 };
 pub use error::{Error, Result};
-pub use protocol::{DeviceError, Request, Response};
+pub use protocol::{
+    Channel, DeviceError, Devices, Dimming, Kelvin, ModelConfig, Pilot, PilotBuilder, PilotParams,
+    Power, Ratio, Request, Response, SceneId, Speed, Success, SystemConfig, UserConfig,
+};
 pub use transport::RetryPolicy;

@@ -510,6 +510,14 @@ impl Shared {
                     push_first: state.push_first,
                 }
             }
+            "reboot" | "reset" => reply(
+                latency,
+                json!({
+                    "method": method,
+                    "env": "pro",
+                    "result": {"success": true},
+                }),
+            ),
             "setPilot" | "setState" => match apply(&mut state.pilot, request.get("params")) {
                 Err((code, message)) => reply(latency, error(method, code, &message)),
                 Ok(()) => {
