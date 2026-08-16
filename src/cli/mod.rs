@@ -13,7 +13,7 @@ use serde_json::json;
 
 mod output;
 
-pub use output::{color_disabled, render_json, HumanRenderer, JsonRenderer, OutputRenderer};
+pub use output::{HumanRenderer, JsonRenderer, OutputRenderer, color_disabled, render_json};
 
 /// Global CLI flags shared across all commands.
 #[derive(Debug, Parser)]
