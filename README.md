@@ -9,9 +9,10 @@ real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
 > **Status: early development, and the published versions are alphas.** The
-> request/response transport and discovery are in; the rest of the list below
-> is not, and **the CLI has no commands yet** — the binary installs and then
-> tells you so. The API will change without warning until `0.1.0`.
+> request/response transport and discovery are in; the CLI now has a parser and
+> global flags, but the actual protocol-backed commands are still intentionally
+> stubbed and return a non-zero error until the rest of the command surface is
+> wired up. The API will change without warning until `0.1.0`.
 >
 > Alphas are published to keep the release path exercised rather than to be
 > depended on, so **every version below has to be spelled out in full**. Cargo
@@ -82,11 +83,13 @@ than 20 ms — so an unreachable bulb fails in under two seconds. See
 [`RetryPolicy`](https://docs.rs/wizlight/latest/wizlight/struct.RetryPolicy.html)
 to change that.
 
-## CLI — not implemented yet
+## CLI scaffold
 
-The binary installs and runs, but it has no commands: it prints an explanation
-and exits non-zero. It ships in the alphas only so that packaging and
-installation are tested before the commands arrive.
+The binary installs and parses the CLI tree, including the global flags and the
+stable output contract. The actual bulb operations are still intentionally
+stubbed, and the command runner exits non-zero with a clear message while the
+protocol layer is implemented. It ships in the alphas so that packaging,
+installation and scripting hooks are exercised before the commands land.
 
 Installing it needs the version spelled out. `cargo install` resolves `*`, and
 `*` does not match a prerelease, so the bare form fails outright rather than
