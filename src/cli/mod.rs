@@ -94,17 +94,9 @@ pub enum Command {
     },
 }
 
-/// Parses the command line, runs the requested command and renders its output.
-pub fn run() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
-    if cli.command.is_none() {
-        let mut cmd = Cli::command();
-        cmd.print_help()?;
-        return Ok(());
-    }
-
-    let payload = match cli.command.unwrap() {
+/// Builds the current stub payload for an unimplemented command.
+pub fn build_stub_payload(command: &Command) -> serde_json::Value {
+    match command {
         Command::Discover => json!({
             "ok": false,
             "command": "discover",
@@ -164,13 +156,35 @@ pub fn run() -> anyhow::Result<()> {
             "target": target,
             "message": "bench is not implemented yet; this is the CLI scaffold"
         }),
-    };
+    }
+}
 
-    if cli.json {
+/// Runs the selected command and emits a non-zero error if the command is still stubbed.
+pub fn run_command(command: Command, json_output: bool) -> anyhow::Result<()> {
+    let payload = build_stub_payload(&command);
+
+    if json_output {
         println!("{}", render_json(&payload));
     } else {
         println!("{}", HumanRenderer.render(&payload));
     }
 
-    Ok(())
+    let message = payload["message"]
+        .as_str()
+        .unwrap_or("the selected command is not implemented yet");
+
+    anyhow::bail!("{message}")
+}
+
+/// Parses the command line, runs the requested command and renders its output.
+pub fn run() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let Some(command) = cli.command else {
+        let mut cmd = Cli::command();
+        cmd.print_help()?;
+        return Ok(());
+    };
+
+    run_command(command, cli.json)
 }
