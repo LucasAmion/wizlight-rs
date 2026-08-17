@@ -61,16 +61,30 @@ async fn main() -> Result<(), wizlight::Error> {
 
     bulb.set_pilot(
         &PilotBuilder::new()
-            .rgb(
-                Channel::new(255)?,
-                Channel::new(80)?,
-                Channel::new(0)?,
-            )
+            .rgb(Channel::new(255), Channel::new(80), Channel::new(0))
             .dimming(Dimming::new(40)?),
     )
     .await?;
     Ok(())
 }
+```
+
+Every channel value is a valid one, so `Channel::new` cannot fail. The types
+that *do* have a range — `Dimming`, `Kelvin`, `Speed`, `Ratio`, `Devices` —
+return a `Result`, because the bulb is not a reliable validator: it silently
+clamps an out-of-range `dimming` and reports success.
+
+Colour, colour temperature and scene are mutually exclusive in one request, and
+asking for two of them fails at build time rather than silently picking one:
+
+```rust
+use wizlight::protocol::{Channel, Kelvin, PilotBuilder};
+
+let clash = PilotBuilder::new()
+    .rgb(Channel::new(255), Channel::new(0), Channel::new(0))
+    .temp(Kelvin::new(2700).expect("2700 K is in range"))
+    .set_pilot();
+assert!(clash.is_err());
 ```
 
 Bulbs are found by broadcasting, and reported as they answer rather than in a

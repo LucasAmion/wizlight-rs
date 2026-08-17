@@ -8,21 +8,61 @@ use crate::protocol::Request;
 
 /// Which colour-bearing field a [`PilotBuilder`] will put on the wire.
 ///
-/// `temp`, `r/g/b` and `sceneId` are mutually exclusive in a single request —
-/// the bulb honours whichever arrives, and a later mode clears the previous one
-/// from `getPilot`. The builder enforces the exclusion so the engine never has
-/// to.
+/// `r`/`g`/`b`/`c`/`w`, `temp` and `sceneId` are mutually exclusive in a single
+/// request: the bulb honours whichever it finds, and a later mode clears the
+/// previous one from `getPilot`. Rather than guess which one the caller meant,
+/// the builder records the clash and [`PilotBuilder::params`] refuses to
+/// produce anything at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ColourMode {
-    Rgb {
-        r: Channel,
-        g: Channel,
-        b: Channel,
+    /// Raw channels. `r`/`g`/`b` and `c`/`w` compose, and either half may be
+    /// sent without the other.
+    Channels {
+        r: Option<Channel>,
+        g: Option<Channel>,
+        b: Option<Channel>,
         c: Option<Channel>,
         w: Option<Channel>,
     },
     Temp(Kelvin),
     Scene(SceneId),
+}
+
+impl ColourMode {
+    const CHANNELS: &'static str = "r/g/b/c/w";
+
+    const fn empty_channels() -> Self {
+        Self::Channels {
+            r: None,
+            g: None,
+            b: None,
+            c: None,
+            w: None,
+        }
+    }
+
+    /// How this mode is named in a conflict message.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Channels { .. } => Self::CHANNELS,
+            Self::Temp(_) => "temp",
+            Self::Scene(_) => "sceneId",
+        }
+    }
+
+    /// True for the placeholder created before any channel is filled in.
+    const fn is_empty(self) -> bool {
+        matches!(
+            self,
+            Self::Channels {
+                r: None,
+                g: None,
+                b: None,
+                c: None,
+                w: None
+            }
+        )
+    }
 }
 
 /// Builds the params object for `setPilot` or `setState`.
@@ -33,20 +73,38 @@ enum ColourMode {
 /// request carries colour, temperature or a scene — the historical claim that
 /// `setState` leaves power alone does not hold.
 ///
+/// Colour, colour temperature and scene are mutually exclusive. Asking for two
+/// of them is an error at build time rather than a silent choice between them,
+/// because a caller that sets both has a bug and a bulb that receives both has
+/// no defined behaviour:
+///
+/// ```
+/// use wizlight::protocol::{Channel, Kelvin, PilotBuilder};
+///
+/// let clash = PilotBuilder::new()
+///     .rgb(Channel::new(255), Channel::new(0), Channel::new(0))
+///     .temp(Kelvin::new(2700)?)
+///     .set_pilot();
+/// assert!(clash.is_err());
+/// # Ok::<(), wizlight::Error>(())
+/// ```
+///
+/// Fields that do not carry colour — `state`, `dimming`, `speed`, `ratio`,
+/// `devices` — compose with any of the three:
+///
 /// ```
 /// use wizlight::protocol::{Channel, Dimming, PilotBuilder};
 ///
 /// let request = PilotBuilder::new()
-///     .rgb(
-///         Channel::new(255)?,
-///         Channel::new(80)?,
-///         Channel::new(0)?,
-///     )
+///     .rgb(Channel::new(255), Channel::new(80), Channel::new(0))
 ///     .dimming(Dimming::new(40)?)
 ///     .set_pilot()?;
 /// assert_eq!(
-///     request.to_string(),
-///     r#"{"method":"setPilot","params":{"r":255,"g":80,"b":0,"dimming":40}}"#
+///     serde_json::to_value(&request)?,
+///     serde_json::json!({
+///         "method": "setPilot",
+///         "params": {"r": 255, "g": 80, "b": 0, "dimming": 40},
+///     }),
 /// );
 /// # Ok::<(), wizlight::Error>(())
 /// ```
@@ -58,10 +116,10 @@ pub struct PilotBuilder {
     ratio: Option<Ratio>,
     devices: Option<Devices>,
     colour: Option<ColourMode>,
-    /// Cold/warm white set without an RGB triple — allowed alongside nothing,
-    /// or as the only colour-ish fields.
-    cold_white: Option<Channel>,
-    warm_white: Option<Channel>,
+    /// The first clash seen, as `(rejected, already set)`. Reported by
+    /// [`PilotBuilder::params`]; kept rather than acted on so the setters can
+    /// stay chainable and infallible.
+    conflict: Option<(&'static str, &'static str)>,
 }
 
 impl PilotBuilder {
@@ -107,21 +165,28 @@ impl PilotBuilder {
         self
     }
 
-    /// Sets `r`/`g`/`b`, clearing any temperature or scene previously set on
-    /// this builder.
+    /// Sets `r`/`g`/`b`.
     ///
-    /// Does **not** run RGB→RGB+CW conversion; that is a separate concern. Send
-    /// raw channels, or add cold/warm white with [`PilotBuilder::cold_white`] /
-    /// [`PilotBuilder::warm_white`].
+    /// Does **not** run RGB→RGB+CW conversion; that is a separate concern.
+    /// Send raw channels, or add cold/warm white with
+    /// [`cold_white`](PilotBuilder::cold_white) /
+    /// [`warm_white`](PilotBuilder::warm_white).
+    ///
+    /// Conflicts with [`temp`](PilotBuilder::temp) and
+    /// [`scene`](PilotBuilder::scene).
     #[must_use]
     pub fn rgb(mut self, r: Channel, g: Channel, b: Channel) -> Self {
-        let (c, w) = match self.colour {
-            Some(ColourMode::Rgb { c, w, .. }) => (c, w),
-            _ => (self.cold_white, self.warm_white),
-        };
-        self.cold_white = None;
-        self.warm_white = None;
-        self.colour = Some(ColourMode::Rgb { r, g, b, c, w });
+        if let Some(ColourMode::Channels {
+            r: rs,
+            g: gs,
+            b: bs,
+            ..
+        }) = self.channels()
+        {
+            *rs = Some(r);
+            *gs = Some(g);
+            *bs = Some(b);
+        }
         self
     }
 
@@ -137,50 +202,46 @@ impl PilotBuilder {
         self.rgb(r, g, b).cold_white(c).warm_white(w)
     }
 
-    /// Sets cold white (`c`). Cleared if a temperature or scene is set later.
+    /// Sets cold white (`c`), with or without an RGB triple.
+    ///
+    /// Conflicts with [`temp`](PilotBuilder::temp) and
+    /// [`scene`](PilotBuilder::scene).
     #[must_use]
     pub fn cold_white(mut self, c: Channel) -> Self {
-        match &mut self.colour {
-            Some(ColourMode::Rgb { c: slot, .. }) => *slot = Some(c),
-            Some(ColourMode::Temp(_) | ColourMode::Scene(_)) => {
-                self.colour = None;
-                self.cold_white = Some(c);
-            }
-            None => self.cold_white = Some(c),
+        if let Some(ColourMode::Channels { c: slot, .. }) = self.channels() {
+            *slot = Some(c);
         }
         self
     }
 
-    /// Sets warm white (`w`). Cleared if a temperature or scene is set later.
+    /// Sets warm white (`w`), with or without an RGB triple.
+    ///
+    /// Conflicts with [`temp`](PilotBuilder::temp) and
+    /// [`scene`](PilotBuilder::scene).
     #[must_use]
     pub fn warm_white(mut self, w: Channel) -> Self {
-        match &mut self.colour {
-            Some(ColourMode::Rgb { w: slot, .. }) => *slot = Some(w),
-            Some(ColourMode::Temp(_) | ColourMode::Scene(_)) => {
-                self.colour = None;
-                self.warm_white = Some(w);
-            }
-            None => self.warm_white = Some(w),
+        if let Some(ColourMode::Channels { w: slot, .. }) = self.channels() {
+            *slot = Some(w);
         }
         self
     }
 
-    /// Sets `temp`, clearing any RGB or scene previously set on this builder.
+    /// Sets `temp`.
+    ///
+    /// Conflicts with the raw channels and with
+    /// [`scene`](PilotBuilder::scene).
     #[must_use]
     pub fn temp(mut self, temp: Kelvin) -> Self {
-        self.colour = Some(ColourMode::Temp(temp));
-        self.cold_white = None;
-        self.warm_white = None;
+        self.set_colour(ColourMode::Temp(temp));
         self
     }
 
-    /// Sets `sceneId`, clearing any RGB or temperature previously set on this
-    /// builder.
+    /// Sets `sceneId`.
+    ///
+    /// Conflicts with the raw channels and with [`temp`](PilotBuilder::temp).
     #[must_use]
     pub fn scene(mut self, scene: SceneId) -> Self {
-        self.colour = Some(ColourMode::Scene(scene));
-        self.cold_white = None;
-        self.warm_white = None;
+        self.set_colour(ColourMode::Scene(scene));
         self
     }
 
@@ -188,8 +249,8 @@ impl PilotBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidParam`] if no field was set — an empty params
-    /// object is refused by the bulb.
+    /// Returns [`Error::InvalidParam`] if two colour modes were set, or if no
+    /// field was set at all — the bulb refuses an empty params object.
     pub fn set_pilot(&self) -> Result<Request> {
         self.to_request("setPilot")
     }
@@ -201,7 +262,7 @@ impl PilotBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidParam`] if no field was set.
+    /// As [`set_pilot`](PilotBuilder::set_pilot).
     pub fn set_state(&self) -> Result<Request> {
         self.to_request("setState")
     }
@@ -210,17 +271,18 @@ impl PilotBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidParam`] if no field was set.
+    /// As [`set_pilot`](PilotBuilder::set_pilot).
     pub fn params(&self) -> Result<PilotParams> {
-        if self.state.is_none()
-            && self.dimming.is_none()
-            && self.speed.is_none()
-            && self.ratio.is_none()
-            && self.devices.is_none()
-            && self.colour.is_none()
-            && self.cold_white.is_none()
-            && self.warm_white.is_none()
-        {
+        if let Some((rejected, existing)) = self.conflict {
+            return Err(Error::InvalidParam {
+                message: format!(
+                    "`{rejected}` conflicts with `{existing}`: colour, colour temperature \
+                     and scene are mutually exclusive in one request"
+                ),
+            });
+        }
+
+        if self.is_empty() {
             return Err(Error::InvalidParam {
                 message: "pilot params must set at least one field".into(),
             });
@@ -236,22 +298,61 @@ impl PilotBuilder {
         };
 
         match self.colour {
-            Some(ColourMode::Rgb { r, g, b, c, w }) => {
-                params.r = Some(r);
-                params.g = Some(g);
-                params.b = Some(b);
-                params.c = c.or(self.cold_white);
-                params.w = w.or(self.warm_white);
+            Some(ColourMode::Channels { r, g, b, c, w }) => {
+                params.r = r;
+                params.g = g;
+                params.b = b;
+                params.c = c;
+                params.w = w;
             }
             Some(ColourMode::Temp(temp)) => params.temp = Some(temp),
             Some(ColourMode::Scene(scene)) => params.scene_id = Some(scene),
-            None => {
-                params.c = self.cold_white;
-                params.w = self.warm_white;
-            }
+            None => {}
         }
 
         Ok(params)
+    }
+
+    /// The channel mode to write into, or `None` if a different colour mode is
+    /// already set — in which case the clash has been recorded.
+    fn channels(&mut self) -> Option<&mut ColourMode> {
+        match self.colour {
+            Some(ColourMode::Channels { .. }) => self.colour.as_mut(),
+            Some(other) => {
+                self.note_conflict(ColourMode::CHANNELS, other.name());
+                None
+            }
+            None => {
+                self.colour = Some(ColourMode::empty_channels());
+                self.colour.as_mut()
+            }
+        }
+    }
+
+    /// Sets a whole-mode colour field, recording a clash with any other mode.
+    /// Replacing a mode with the same kind — two `temp` calls — is not a
+    /// clash; the last one wins, as with every other setter.
+    fn set_colour(&mut self, mode: ColourMode) {
+        match self.colour {
+            Some(existing) if existing.name() != mode.name() => {
+                self.note_conflict(mode.name(), existing.name());
+            }
+            _ => self.colour = Some(mode),
+        }
+    }
+
+    /// Keeps the first clash: it is the one that explains what the caller did.
+    fn note_conflict(&mut self, rejected: &'static str, existing: &'static str) {
+        self.conflict.get_or_insert((rejected, existing));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.state.is_none()
+            && self.dimming.is_none()
+            && self.speed.is_none()
+            && self.ratio.is_none()
+            && self.devices.is_none()
+            && self.colour.is_none_or(ColourMode::is_empty)
     }
 
     fn to_request(&self, method: &str) -> Result<Request> {
@@ -308,54 +409,56 @@ pub struct PilotParams {
 ///
 /// Every field is optional: the bulb only returns what the active mode needs,
 /// and firmware revisions add keys. A missing field is `None`, never a parse
-/// error.
+/// error. Values are the plain integers the bulb reported, not the validated
+/// newtypes a request uses — a bulb may report what it would not accept.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Pilot {
     /// Bulb MAC, lowercase hex with no separators.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
     /// Received signal strength, dBm.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rssi: Option<i32>,
     /// Whether the bulb is on.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<bool>,
     /// Red channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub r: Option<u8>,
     /// Green channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub g: Option<u8>,
     /// Blue channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub b: Option<u8>,
     /// Cold white channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub c: Option<u8>,
     /// Warm white channel.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub w: Option<u8>,
     /// Brightness percent. Present even when the bulb is off.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dimming: Option<u8>,
     /// Colour temperature in Kelvin, when in white mode.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temp: Option<u16>,
     /// Active scene. `0` means "no scene" while RGB is active.
-    #[serde(default, rename = "sceneId", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "sceneId", skip_serializing_if = "Option::is_none")]
     pub scene_id: Option<u16>,
     /// Scene animation speed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<u8>,
     /// Dual-head ratio.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ratio: Option<u8>,
-    /// Dual-head device selector, mostly seen on push traffic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Dual-head head tag. Zero-based on a `getPilot` answer, one-based in
+    /// `syncPilot` push traffic.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub devices: Option<u8>,
     /// Where the state came from (`udp`, `hb`, `wizc1`, …). Push only.
-    #[serde(default, rename = "src", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "src", skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
 
@@ -380,6 +483,10 @@ impl Pilot {
 }
 
 /// `{"success": true}` — the usual write acknowledgement.
+///
+/// The convenience methods on [`Bulb`](crate::Bulb) check this and turn a
+/// `false` into an error, so it is only interesting to callers driving
+/// [`Response::parse_result`](super::Response::parse_result) themselves.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Success {
     /// Whether the bulb accepted the write.
@@ -389,43 +496,109 @@ pub struct Success {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::types::{Channel, Dimming, Kelvin, SceneId, Speed};
+    use serde_json::json;
+
+    fn wire(request: &Request) -> serde_json::Value {
+        serde_json::to_value(request).expect("a request always serialises")
+    }
 
     #[test]
-    fn rgb_temp_and_scene_replace_each_other() {
-        let rgb = PilotBuilder::new()
+    fn conflicting_colour_modes_are_rejected() {
+        let cases = [
+            PilotBuilder::new().temp(Kelvin::new(2700).unwrap()).rgb(
+                Channel::new(1),
+                Channel::new(2),
+                Channel::new(3),
+            ),
+            PilotBuilder::new()
+                .rgb(Channel::new(1), Channel::new(2), Channel::new(3))
+                .temp(Kelvin::new(4000).unwrap()),
+            PilotBuilder::new()
+                .temp(Kelvin::new(4000).unwrap())
+                .scene(SceneId::new(4)),
+            PilotBuilder::new().scene(SceneId::new(4)).rgb(
+                Channel::new(1),
+                Channel::new(2),
+                Channel::new(3),
+            ),
+            // Standalone white channels are part of the channel mode, so they
+            // clash with temp exactly as an RGB triple would.
+            PilotBuilder::new()
+                .temp(Kelvin::new(4000).unwrap())
+                .warm_white(Channel::new(10)),
+        ];
+
+        for builder in cases {
+            let err = builder.set_pilot().unwrap_err();
+            assert!(
+                matches!(&err, Error::InvalidParam { message } if message.contains("mutually exclusive")),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_conflict_message_names_both_modes() {
+        let err = PilotBuilder::new()
             .temp(Kelvin::new(2700).unwrap())
-            .rgb(
-                Channel::new(1).unwrap(),
-                Channel::new(2).unwrap(),
-                Channel::new(3).unwrap(),
-            )
-            .params()
-            .unwrap();
-        assert!(rgb.temp.is_none());
-        assert_eq!(rgb.r.unwrap().get(), 1);
+            .scene(SceneId::new(4))
+            .set_pilot()
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("`sceneId`"), "{message}");
+        assert!(message.contains("`temp`"), "{message}");
+    }
 
-        let temp = PilotBuilder::new()
-            .rgb(
-                Channel::new(1).unwrap(),
-                Channel::new(2).unwrap(),
-                Channel::new(3).unwrap(),
-            )
+    #[test]
+    fn resetting_the_same_mode_is_not_a_conflict() {
+        let params = PilotBuilder::new()
+            .temp(Kelvin::new(2700).unwrap())
             .temp(Kelvin::new(4000).unwrap())
             .params()
             .unwrap();
-        assert!(temp.r.is_none());
-        assert_eq!(temp.temp.unwrap().get(), 4000);
+        assert_eq!(params.temp.unwrap().get(), 4000);
 
-        let scene = PilotBuilder::new()
-            .temp(Kelvin::new(4000).unwrap())
-            .scene(SceneId::new(4).unwrap())
+        let params = PilotBuilder::new()
+            .rgb(Channel::new(1), Channel::new(2), Channel::new(3))
+            .rgb(Channel::new(4), Channel::new(5), Channel::new(6))
+            .params()
+            .unwrap();
+        assert_eq!(params.r.unwrap().get(), 4);
+    }
+
+    #[test]
+    fn non_colour_fields_compose_with_every_mode() {
+        let params = PilotBuilder::new()
+            .scene(SceneId::new(4))
             .speed(Speed::new(100).unwrap())
+            .dimming(Dimming::new(40).unwrap())
+            .state(true)
             .params()
             .unwrap();
-        assert!(scene.temp.is_none());
-        assert_eq!(scene.scene_id.unwrap().get(), 4);
-        assert_eq!(scene.speed.unwrap().get(), 100);
+        assert_eq!(params.scene_id.unwrap().get(), 4);
+        assert_eq!(params.speed.unwrap().get(), 100);
+        assert_eq!(params.dimming.unwrap().get(), 40);
+        assert_eq!(params.state, Some(true));
+    }
+
+    #[test]
+    fn white_channels_compose_with_rgb_in_either_order() {
+        let after = PilotBuilder::new()
+            .rgb(Channel::new(1), Channel::new(2), Channel::new(3))
+            .cold_white(Channel::new(4))
+            .warm_white(Channel::new(5))
+            .params()
+            .unwrap();
+        let before = PilotBuilder::new()
+            .cold_white(Channel::new(4))
+            .warm_white(Channel::new(5))
+            .rgb(Channel::new(1), Channel::new(2), Channel::new(3))
+            .params()
+            .unwrap();
+        assert_eq!(after, before);
+        assert_eq!(after.c.unwrap().get(), 4);
+        assert_eq!(after.w.unwrap().get(), 5);
+        assert_eq!(after.r.unwrap().get(), 1);
     }
 
     #[test]
@@ -439,69 +612,95 @@ mod tests {
         let cases = [
             (
                 PilotBuilder::new().state(true).set_pilot().unwrap(),
-                r#"{"method":"setPilot","params":{"state":true}}"#,
+                json!({"method": "setPilot", "params": {"state": true}}),
             ),
             (
                 PilotBuilder::new()
                     .dimming(Dimming::new(40).unwrap())
                     .set_pilot()
                     .unwrap(),
-                r#"{"method":"setPilot","params":{"dimming":40}}"#,
+                json!({"method": "setPilot", "params": {"dimming": 40}}),
             ),
             (
                 PilotBuilder::new()
-                    .rgb(
-                        Channel::new(255).unwrap(),
-                        Channel::new(80).unwrap(),
-                        Channel::new(0).unwrap(),
+                    .rgb(Channel::new(255), Channel::new(80), Channel::new(0))
+                    .set_pilot()
+                    .unwrap(),
+                json!({"method": "setPilot", "params": {"r": 255, "g": 80, "b": 0}}),
+            ),
+            (
+                PilotBuilder::new()
+                    .rgbw(
+                        Channel::new(255),
+                        Channel::new(80),
+                        Channel::new(0),
+                        Channel::new(12),
                     )
                     .set_pilot()
                     .unwrap(),
-                r#"{"method":"setPilot","params":{"r":255,"g":80,"b":0}}"#,
+                json!({"method": "setPilot", "params": {"r": 255, "g": 80, "b": 0, "w": 12}}),
             ),
             (
                 PilotBuilder::new()
                     .rgbww(
-                        Channel::new(0).unwrap(),
-                        Channel::new(128).unwrap(),
-                        Channel::new(255).unwrap(),
-                        Channel::new(0).unwrap(),
-                        Channel::new(0).unwrap(),
+                        Channel::new(0),
+                        Channel::new(128),
+                        Channel::new(255),
+                        Channel::new(0),
+                        Channel::new(0),
                     )
                     .set_pilot()
                     .unwrap(),
-                r#"{"method":"setPilot","params":{"r":0,"g":128,"b":255,"c":0,"w":0}}"#,
+                json!({
+                    "method": "setPilot",
+                    "params": {"r": 0, "g": 128, "b": 255, "c": 0, "w": 0},
+                }),
+            ),
+            (
+                PilotBuilder::new()
+                    .warm_white(Channel::new(200))
+                    .set_pilot()
+                    .unwrap(),
+                json!({"method": "setPilot", "params": {"w": 200}}),
             ),
             (
                 PilotBuilder::new()
                     .temp(Kelvin::new(5000).unwrap())
                     .set_pilot()
                     .unwrap(),
-                r#"{"method":"setPilot","params":{"temp":5000}}"#,
+                json!({"method": "setPilot", "params": {"temp": 5000}}),
             ),
             (
                 PilotBuilder::new()
-                    .scene(SceneId::new(4).unwrap())
+                    .scene(SceneId::new(4))
                     .speed(Speed::new(100).unwrap())
                     .set_pilot()
                     .unwrap(),
-                r#"{"method":"setPilot","params":{"sceneId":4,"speed":100}}"#,
+                json!({"method": "setPilot", "params": {"sceneId": 4, "speed": 100}}),
             ),
             (
                 PilotBuilder::new()
-                    .rgb(
-                        Channel::new(255).unwrap(),
-                        Channel::new(0).unwrap(),
-                        Channel::new(0).unwrap(),
-                    )
+                    .state(true)
+                    .ratio(Ratio::new(75).unwrap())
+                    .devices(Devices::new(2).unwrap())
+                    .set_pilot()
+                    .unwrap(),
+                json!({
+                    "method": "setPilot",
+                    "params": {"state": true, "ratio": 75, "devices": 2},
+                }),
+            ),
+            (
+                PilotBuilder::new()
+                    .rgb(Channel::new(255), Channel::new(0), Channel::new(0))
                     .set_state()
                     .unwrap(),
-                r#"{"method":"setState","params":{"r":255,"g":0,"b":0}}"#,
+                json!({"method": "setState", "params": {"r": 255, "g": 0, "b": 0}}),
             ),
         ];
 
         for (request, expected) in cases {
-            assert_eq!(request.to_string(), expected);
+            assert_eq!(wire(&request), expected);
         }
     }
 
@@ -512,6 +711,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(colour.rgb(), Some((255, 0, 0)));
+        assert_eq!(colour.rgbw(), Some((255, 0, 0, 0)));
         assert_eq!(colour.rgbww(), Some((255, 0, 0, 0, 0)));
         assert!(colour.temp.is_none());
 
@@ -522,5 +722,15 @@ mod tests {
         assert_eq!(white.temp, Some(2700));
         assert!(white.r.is_none());
         assert_eq!(white.scene_id, Some(11));
+        assert_eq!(white.rgb(), None);
+        assert_eq!(white.rgbw(), None);
+    }
+
+    #[test]
+    fn a_reported_value_the_builder_would_refuse_still_parses() {
+        // The bulb reports `dimming: 0` on some off bulbs, which `Dimming`
+        // rejects. Results must not inherit the write-side bound.
+        let pilot: Pilot = serde_json::from_str(r#"{"state":false,"dimming":0}"#).unwrap();
+        assert_eq!(pilot.dimming, Some(0));
     }
 }

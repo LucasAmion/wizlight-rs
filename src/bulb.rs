@@ -106,10 +106,12 @@ impl Bulb {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidParam`] if the builder is empty, and otherwise
-    /// whatever [`request`](Bulb::request) returns.
-    pub async fn set_pilot(&self, pilot: &PilotBuilder) -> Result<Success> {
-        self.request(&pilot.set_pilot()?).await?.parse_result()
+    /// Returns [`Error::InvalidParam`] if the builder set no field or two
+    /// conflicting colour modes, [`Error::Device`] if the bulb acknowledged
+    /// with `success: false`, and otherwise whatever
+    /// [`request`](Bulb::request) returns.
+    pub async fn set_pilot(&self, pilot: &PilotBuilder) -> Result<()> {
+        self.write("setPilot", &pilot.set_pilot()?).await
     }
 
     /// Applies a pilot built with [`PilotBuilder`] via `setState`.
@@ -120,10 +122,9 @@ impl Bulb {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidParam`] if the builder is empty, and otherwise
-    /// whatever [`request`](Bulb::request) returns.
-    pub async fn set_state(&self, pilot: &PilotBuilder) -> Result<Success> {
-        self.request(&pilot.set_state()?).await?.parse_result()
+    /// As [`set_pilot`](Bulb::set_pilot).
+    pub async fn set_state(&self, pilot: &PilotBuilder) -> Result<()> {
+        self.write("setState", &pilot.set_state()?).await
     }
 
     /// Reads `getSystemConfig`.
@@ -178,20 +179,30 @@ impl Bulb {
 
     /// Asks the bulb to reboot.
     ///
+    /// **Fire and forget.** Neither this nor [`reset`](Bulb::reset) has been
+    /// run against hardware, and a device that is rebooting or wiping itself
+    /// has an obvious reason not to answer — so a timeout is treated as
+    /// success here rather than reported as a failure. `pywizlight` sends both
+    /// and ignores the reply entirely. If a bulb does acknowledge, a refusal
+    /// is still surfaced: only silence is forgiven.
+    ///
     /// # Errors
     ///
-    /// See [`request`](Bulb::request).
-    pub async fn reboot(&self) -> Result<Success> {
-        self.request(&Request::new("reboot")).await?.parse_result()
+    /// See [`request`](Bulb::request), less [`Error::Timeout`].
+    pub async fn reboot(&self) -> Result<()> {
+        self.fire_and_forget("reboot").await
     }
 
-    /// Factory-resets the bulb.
+    /// Factory-resets the bulb, unpairing it and clearing its Wi-Fi
+    /// credentials. There is no way to undo this over the network.
+    ///
+    /// Fire and forget, for the reasons on [`reboot`](Bulb::reboot).
     ///
     /// # Errors
     ///
-    /// See [`request`](Bulb::request).
-    pub async fn reset(&self) -> Result<Success> {
-        self.request(&Request::new("reset")).await?.parse_result()
+    /// See [`request`](Bulb::request), less [`Error::Timeout`].
+    pub async fn reset(&self) -> Result<()> {
+        self.fire_and_forget("reset").await
     }
 
     /// The bulb's usable Kelvin range.
@@ -245,6 +256,33 @@ impl Bulb {
         self.transport
             .exchange(self.addr, request, &self.policy)
             .await
+    }
+
+    /// Sends a write and insists the bulb actually accepted it.
+    ///
+    /// `{"success": false}` has not been observed on any bulb here, but it is
+    /// the shape the protocol allows for a refusal that is not an `error`
+    /// envelope, and a write that silently did nothing is the one outcome a
+    /// caller must not miss.
+    async fn write(&self, method: &str, request: &Request) -> Result<()> {
+        let ack: Success = self.request(request).await?.parse_result()?;
+        if ack.success {
+            Ok(())
+        } else {
+            Err(Error::Device {
+                method: method.to_owned(),
+                code: 0,
+                message: "bulb acknowledged with `success: false`".to_owned(),
+            })
+        }
+    }
+
+    /// Sends a request whose reply, if any, is not worth waiting for.
+    async fn fire_and_forget(&self, method: &str) -> Result<()> {
+        match self.request(&Request::new(method)).await {
+            Ok(_) | Err(Error::Timeout { .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 }
 

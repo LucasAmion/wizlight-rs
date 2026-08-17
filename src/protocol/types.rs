@@ -1,402 +1,172 @@
 //! Validated pilot parameter newtypes.
 //!
 //! The bulb is not a reliable validator: an out-of-range `dimming` is silently
-//! clamped and still reports success, while an out-of-range `temp` errors. Ranges
-//! are therefore enforced here, before anything is serialised.
+//! clamped and still reports success, while an out-of-range `temp` errors.
+//! Ranges are therefore enforced here, before anything is serialised.
+//!
+//! These are **write-side** types. Nothing here implements `Deserialize`, and
+//! that is deliberate: a bulb is free to *report* a value these constructors
+//! would refuse — `dimming: 0` on an off bulb is the known case — and a
+//! validating parse would turn that into a hard error. Results use the plain
+//! integer, per the forward-compatibility rule in [`super`].
+
+use serde::Serialize;
 
 use crate::error::{Error, Result};
 
-/// An 8-bit channel value (`r` / `g` / `b` / `c` / `w`), in `0..=255`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Channel(u8);
+/// Defines a newtype whose range is checked on construction.
+macro_rules! bounded_newtype {
+    (
+        $(#[$attr:meta])*
+        $name:ident($repr:ty), $wire:literal, $min:literal ..= $max:literal
+    ) => {
+        $(#[$attr])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+        pub struct $name($repr);
 
-impl Channel {
-    /// The inclusive range the wire format accepts.
-    pub const MIN: u8 = 0;
-    /// The inclusive upper bound.
-    pub const MAX: u8 = 255;
+        impl $name {
+            /// The inclusive lower bound.
+            pub const MIN: $repr = $min;
+            /// The inclusive upper bound.
+            pub const MAX: $repr = $max;
 
-    /// Builds a channel value.
-    ///
-    /// # Errors
-    ///
-    /// Never fails for a `u8`; the constructor exists so every pilot field goes
-    /// through the same shape of API.
-    pub fn new(value: u8) -> Result<Self> {
-        Ok(Self(value))
-    }
+            #[doc = concat!("Builds a `", $wire, "` value.")]
+            ///
+            /// # Errors
+            ///
+            /// Returns [`Error::InvalidParam`] if `value` is outside
+            #[doc = concat!("`", stringify!($min), "..=", stringify!($max), "`.")]
+            pub fn new(value: $repr) -> Result<Self> {
+                if (Self::MIN..=Self::MAX).contains(&value) {
+                    Ok(Self(value))
+                } else {
+                    Err(Error::InvalidParam {
+                        message: format!(
+                            concat!($wire, " must be {}..={}, got {}"),
+                            Self::MIN,
+                            Self::MAX,
+                            value,
+                        ),
+                    })
+                }
+            }
 
-    /// The raw value.
-    #[must_use]
-    pub const fn get(self) -> u8 {
-        self.0
-    }
-}
-
-impl From<Channel> for u8 {
-    fn from(value: Channel) -> Self {
-        value.0
-    }
-}
-
-impl serde::Serialize for Channel {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_u8(self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Channel {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let value = u8::deserialize(deserializer)?;
-        Ok(Self(value))
-    }
-}
-
-/// Brightness as the bulb understands it: `dimming` in `1..=100`.
-///
-/// `0` is out of range on the wire; an off bulb is expressed with `state: false`,
-/// not `dimming: 0`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Dimming(u8);
-
-impl Dimming {
-    /// The inclusive lower bound.
-    pub const MIN: u8 = 1;
-    /// The inclusive upper bound.
-    pub const MAX: u8 = 100;
-
-    /// Builds a dimming value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidParam`] if `value` is outside `1..=100`.
-    pub fn new(value: u8) -> Result<Self> {
-        if (Self::MIN..=Self::MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(Error::InvalidParam {
-                message: format!("dimming must be {}..={}, got {value}", Self::MIN, Self::MAX),
-            })
+            /// The raw value.
+            #[must_use]
+            pub const fn get(self) -> $repr {
+                self.0
+            }
         }
-    }
 
-    /// The raw percent.
-    #[must_use]
-    pub const fn get(self) -> u8 {
-        self.0
-    }
-}
-
-impl From<Dimming> for u8 {
-    fn from(value: Dimming) -> Self {
-        value.0
-    }
-}
-
-impl serde::Serialize for Dimming {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_u8(self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Dimming {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let value = u8::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// Scene animation speed, in `10..=200`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Speed(u8);
-
-impl Speed {
-    /// The inclusive lower bound.
-    pub const MIN: u8 = 10;
-    /// The inclusive upper bound.
-    pub const MAX: u8 = 200;
-
-    /// Builds a speed value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidParam`] if `value` is outside `10..=200`.
-    pub fn new(value: u8) -> Result<Self> {
-        if (Self::MIN..=Self::MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(Error::InvalidParam {
-                message: format!("speed must be {}..={}, got {value}", Self::MIN, Self::MAX),
-            })
+        impl From<$name> for $repr {
+            fn from(value: $name) -> Self {
+                value.0
+            }
         }
-    }
-
-    /// The raw value.
-    #[must_use]
-    pub const fn get(self) -> u8 {
-        self.0
-    }
+    };
 }
 
-impl From<Speed> for u8 {
-    fn from(value: Speed) -> Self {
-        value.0
-    }
-}
+/// Defines a newtype that accepts every value its representation can hold.
+macro_rules! open_newtype {
+    ($(#[$attr:meta])* $name:ident($repr:ty)) => {
+        $(#[$attr])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+        pub struct $name($repr);
 
-impl serde::Serialize for Speed {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_u8(self.0)
-    }
-}
+        impl $name {
+            /// Builds a value. Every
+            #[doc = concat!("`", stringify!($repr), "`")]
+            /// is accepted, so this cannot fail.
+            #[must_use]
+            pub const fn new(value: $repr) -> Self {
+                Self(value)
+            }
 
-impl<'de> serde::Deserialize<'de> for Speed {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let value = u8::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// Colour temperature in Kelvin, in `1000..=10000`.
-///
-/// A bulb's usable range is usually narrower and comes from
-/// [`ModelConfig`](super::ModelConfig) / [`UserConfig`](super::UserConfig); this
-/// is only the wire-format bound.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Kelvin(u16);
-
-impl Kelvin {
-    /// The inclusive lower bound the protocol accepts.
-    pub const MIN: u16 = 1000;
-    /// The inclusive upper bound the protocol accepts.
-    pub const MAX: u16 = 10_000;
-
-    /// Builds a Kelvin value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidParam`] if `value` is outside `1000..=10000`.
-    pub fn new(value: u16) -> Result<Self> {
-        if (Self::MIN..=Self::MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(Error::InvalidParam {
-                message: format!("temp must be {}..={}, got {value}", Self::MIN, Self::MAX),
-            })
+            /// The raw value.
+            #[must_use]
+            pub const fn get(self) -> $repr {
+                self.0
+            }
         }
-    }
 
-    /// The raw Kelvin value.
-    #[must_use]
-    pub const fn get(self) -> u16 {
-        self.0
-    }
-}
-
-impl From<Kelvin> for u16 {
-    fn from(value: Kelvin) -> Self {
-        value.0
-    }
-}
-
-impl serde::Serialize for Kelvin {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_u16(self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Kelvin {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let value = u16::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// Dual-head balance (`ratio`), in `0..=100`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Ratio(u8);
-
-impl Ratio {
-    /// The inclusive lower bound.
-    pub const MIN: u8 = 0;
-    /// The inclusive upper bound.
-    pub const MAX: u8 = 100;
-
-    /// Builds a ratio value.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidParam`] if `value` is outside `0..=100`.
-    pub fn new(value: u8) -> Result<Self> {
-        if (Self::MIN..=Self::MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(Error::InvalidParam {
-                message: format!("ratio must be {}..={}, got {value}", Self::MIN, Self::MAX),
-            })
+        impl From<$repr> for $name {
+            fn from(value: $repr) -> Self {
+                Self(value)
+            }
         }
-    }
 
-    /// The raw percent.
-    #[must_use]
-    pub const fn get(self) -> u8 {
-        self.0
-    }
+        impl From<$name> for $repr {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+    };
 }
 
-impl From<Ratio> for u8 {
-    fn from(value: Ratio) -> Self {
-        value.0
-    }
+open_newtype! {
+    /// An 8-bit channel value (`r` / `g` / `b` / `c` / `w`).
+    ///
+    /// The wire range is the whole of `u8`, so construction is infallible.
+    Channel(u8)
 }
 
-impl serde::Serialize for Ratio {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_u8(self.0)
-    }
+open_newtype! {
+    /// A WiZ scene identifier.
+    ///
+    /// Preset scenes are `1..=40`, custom slots `256..=265`, and `1000` is
+    /// Rhythm. The id space is sparse and firmware-dependent, so unknown ids
+    /// are left for the bulb — or a later scene table — to reject rather than
+    /// being refused here.
+    SceneId(u16)
 }
-
-impl<'de> serde::Deserialize<'de> for Ratio {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let value = u8::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// A WiZ scene identifier.
-///
-/// Preset scenes are `1..=40`, custom slots `256..=265`, and `1000` is Rhythm.
-/// Per-class availability is a separate concern; this type only carries the id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SceneId(u16);
 
 impl SceneId {
     /// Rhythm, the special scene the official app uses for music modes.
-    pub const RHYTHM: Self = Self(1000);
+    pub const RHYTHM: Self = Self::new(1000);
+}
 
-    /// Builds a scene id.
+bounded_newtype! {
+    /// Brightness as the bulb understands it: `dimming` in `1..=100`.
     ///
-    /// # Errors
+    /// `0` is out of range on the wire; an off bulb is expressed with
+    /// `state: false`, not `dimming: 0`.
+    Dimming(u8), "dimming", 1..=100
+}
+
+bounded_newtype! {
+    /// Scene animation speed, in `10..=200`.
     ///
-    /// Never fails today — the id space is sparse and firmware-dependent, so
-    /// unknown ids are left for the bulb (or a later scene table) to reject.
-    pub fn new(value: u16) -> Result<Self> {
-        Ok(Self(value))
-    }
-
-    /// The raw id.
-    #[must_use]
-    pub const fn get(self) -> u16 {
-        self.0
-    }
+    /// Unverified: inherited from `pywizlight`, not measured on hardware.
+    Speed(u8), "speed", 10..=200
 }
 
-impl From<SceneId> for u16 {
-    fn from(value: SceneId) -> Self {
-        value.0
-    }
-}
-
-impl serde::Serialize for SceneId {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_u16(self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for SceneId {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let value = u16::deserialize(deserializer)?;
-        Ok(Self(value))
-    }
-}
-
-/// Dual-head device selector (`devices`).
-///
-/// `1` and `2` address each head; `3` addresses both. Measured only as a field
-/// that appears in push traffic so far — the range follows `pywizlight`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Devices(u8);
-
-impl Devices {
-    /// The inclusive lower bound.
-    pub const MIN: u8 = 1;
-    /// The inclusive upper bound (`1`, `2`, or both).
-    pub const MAX: u8 = 3;
-
-    /// Builds a device selector.
+bounded_newtype! {
+    /// Colour temperature in Kelvin, in `1000..=10000`.
     ///
-    /// # Errors
+    /// A bulb's usable range is usually narrower and comes from
+    /// [`ModelConfig`](super::ModelConfig) / [`UserConfig`](super::UserConfig);
+    /// this is only the wire-format bound.
+    Kelvin(u16), "temp", 1000..=10_000
+}
+
+bounded_newtype! {
+    /// Dual-head balance (`ratio`), in `0..=100`.
     ///
-    /// Returns [`Error::InvalidParam`] if `value` is outside `1..=3`.
-    pub fn new(value: u8) -> Result<Self> {
-        if (Self::MIN..=Self::MAX).contains(&value) {
-            Ok(Self(value))
-        } else {
-            Err(Error::InvalidParam {
-                message: format!("devices must be {}..={}, got {value}", Self::MIN, Self::MAX),
-            })
-        }
-    }
-
-    /// The raw selector.
-    #[must_use]
-    pub const fn get(self) -> u8 {
-        self.0
-    }
+    /// Unverified: inherited from `pywizlight`, not measured on hardware.
+    Ratio(u8), "ratio", 0..=100
 }
 
-impl From<Devices> for u8 {
-    fn from(value: Devices) -> Self {
-        value.0
-    }
-}
-
-impl serde::Serialize for Devices {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_u8(self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for Devices {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let value = u8::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
+bounded_newtype! {
+    /// Dual-head device selector (`devices`) for a **write**, in `1..=3`.
+    ///
+    /// Unverified. The bound is `pywizlight`'s (`1 <= value < 4`); what each
+    /// value selects is not documented there and has not been measured here.
+    /// `1` and `2` appear as per-head tags in `syncPilot` push traffic.
+    ///
+    /// Note that `getPilot` uses a *different*, zero-based convention for the
+    /// same key — `pywizlight` polls heads with `{"devices": 0}` and
+    /// `{"devices": 1}` — so this type deliberately does not cover reads.
+    Devices(u8), "devices", 1..=3
 }
 
 #[cfg(test)]
@@ -412,11 +182,34 @@ mod tests {
     }
 
     #[test]
-    fn speed_and_kelvin_enforce_their_ranges() {
+    fn speed_kelvin_ratio_and_devices_enforce_their_ranges() {
         assert!(Speed::new(9).is_err());
         assert!(Speed::new(201).is_err());
         assert!(Kelvin::new(999).is_err());
         assert!(Kelvin::new(10_001).is_err());
         assert_eq!(Kelvin::new(2700).unwrap().get(), 2700);
+        assert!(Ratio::new(101).is_err());
+        assert_eq!(Ratio::new(0).unwrap().get(), 0);
+        assert!(Devices::new(0).is_err());
+        assert!(Devices::new(4).is_err());
+        assert_eq!(Devices::new(3).unwrap().get(), 3);
+    }
+
+    #[test]
+    fn open_newtypes_accept_their_whole_range() {
+        assert_eq!(Channel::new(0).get(), 0);
+        assert_eq!(Channel::new(255).get(), 255);
+        assert_eq!(Channel::from(12u8).get(), 12);
+        assert_eq!(SceneId::RHYTHM.get(), 1000);
+        assert_eq!(u16::from(SceneId::new(40)), 40);
+    }
+
+    #[test]
+    fn the_error_names_the_wire_field_and_the_bound() {
+        let message = Dimming::new(0).unwrap_err().to_string();
+        assert!(
+            message.contains("dimming must be 1..=100, got 0"),
+            "{message}"
+        );
     }
 }

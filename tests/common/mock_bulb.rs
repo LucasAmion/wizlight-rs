@@ -32,6 +32,14 @@
 //! `pywizlight` or from the documented parameter ranges and has **not** been
 //! confirmed against hardware.
 //!
+//! `reboot` and `reset` are the sharpest case of that. Both are answered here
+//! with `{"success": true}`, and **nothing** backs that up: there is no capture
+//! of either, `pywizlight` fires them and ignores the reply, and a bulb that is
+//! rebooting or clearing its own credentials has every reason to say nothing at
+//! all. The client therefore treats silence as success, and this reply exists
+//! only so the acknowledging case is exercised too — do not read it as evidence
+//! that hardware acknowledges.
+//!
 //! The bulb binds `0.0.0.0`, not `127.0.0.1`: a loopback-bound socket never
 //! receives broadcast, which discovery tests depend on.
 
@@ -510,6 +518,8 @@ impl Shared {
                     push_first: state.push_first,
                 }
             }
+            // Assumed, not measured — see the fidelity notes at the top of the
+            // module. Real hardware may well answer nothing.
             "reboot" | "reset" => reply(
                 latency,
                 json!({

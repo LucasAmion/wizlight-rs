@@ -51,7 +51,12 @@ required-features = ["cli"]
 # needed to produce one.
 futures-core = "0.3.31"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.151", features = ["preserve_order"] }
+# Deliberately *not* `preserve_order`. It would keep `Request`'s params in
+# declaration order on the wire, but cargo feature unification would then
+# impose an IndexMap-backed `serde_json::Map` on every other crate in a
+# consumer's build. Nothing observed suggests a bulb cares about key order, so
+# the wire tests compare parsed JSON rather than bytes.
+serde_json = "1.0.151"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", default-features = false, features = [
     "net",

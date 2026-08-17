@@ -18,12 +18,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `kelvin_range` helper that falls back from `getModelConfig` to `getUserConfig`
   on older firmware.
 
+### Notes on the pilot surface
+
+- Colour, colour temperature and scene are **mutually exclusive, and a builder
+  that sets two of them fails** in `set_pilot` / `set_state` / `params` rather
+  than silently keeping the last one. A caller that sets both has a bug, and a
+  bulb that receives both has no defined behaviour.
+- Only requests carry the validated newtypes. Results carry plain integers,
+  because a bulb may report a value it would refuse to be sent — `dimming: 0`
+  on an off bulb — and a validating parse would turn that into an error.
+- `Channel` and `SceneId` construction is infallible, so it does not return a
+  `Result` that can never be `Err`.
+- `reboot` and `reset` are fire-and-forget: they return `()` and treat a
+  timeout as success. Neither has been run against hardware, and a device that
+  is rebooting or clearing its credentials has every reason not to answer.
+- `set_pilot` / `set_state` return `()` and raise `Error::Device` if the bulb
+  acknowledges with `success: false`, rather than handing back an ack that is
+  easy to ignore.
+
 ### Known gaps
 
 - No bulb model / capability parsing beyond the raw config structs, and no scene
   tables yet.
 - No RGB ↔ RGB+CW conversion.
 - No streaming path and no `syncPilot` push listener.
+- `getPilot` per-head reads are not implemented. `devices` uses a one-based
+  convention for writes and a zero-based one for reads, and only the former is
+  modelled.
 - The `wizlight` binary still stubs the command runner.
 
 ## [0.1.0-alpha.1] — 2026-08-14

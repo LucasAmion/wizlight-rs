@@ -10,35 +10,31 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct SystemConfig {
     /// Bulb MAC.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
     /// Home the bulb is paired to.
-    #[serde(default, rename = "homeId", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "homeId", skip_serializing_if = "Option::is_none")]
     pub home_id: Option<u64>,
     /// Room inside that home.
-    #[serde(default, rename = "roomId", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "roomId", skip_serializing_if = "Option::is_none")]
     pub room_id: Option<u64>,
     /// Region code, e.g. `eu`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub rgn: Option<String>,
     /// Module name, e.g. `ESP25_SHRGB_01`. Capability parsing is a later concern.
-    #[serde(
-        default,
-        rename = "moduleName",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "moduleName", skip_serializing_if = "Option::is_none")]
     pub module_name: Option<String>,
     /// Firmware version string.
-    #[serde(default, rename = "fwVersion", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fwVersion", skip_serializing_if = "Option::is_none")]
     pub fw_version: Option<String>,
     /// Group id.
-    #[serde(default, rename = "groupId", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "groupId", skip_serializing_if = "Option::is_none")]
     pub group_id: Option<u64>,
     /// Pre-1.22 driver config: `[white_to_color_ratio, white_channels]`.
-    #[serde(default, rename = "drvConf", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "drvConf", skip_serializing_if = "Option::is_none")]
     pub drv_conf: Option<Vec<u32>>,
     /// Type id on some older firmware.
-    #[serde(default, rename = "typeId", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "typeId", skip_serializing_if = "Option::is_none")]
     pub type_id: Option<u32>,
 }
 
@@ -50,22 +46,22 @@ pub struct SystemConfig {
 #[serde(default)]
 pub struct ModelConfig {
     /// White-to-colour ratio.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub wcr: Option<u32>,
     /// Number of white channels.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nowc: Option<u32>,
     /// Colour-temperature range: `[min, start, end, max]` on current firmware.
-    #[serde(default, rename = "cctRange", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "cctRange", skip_serializing_if = "Option::is_none")]
     pub cct_range: Option<Vec<u16>>,
     /// PWM duty range.
-    #[serde(default, rename = "pwmRange", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "pwmRange", skip_serializing_if = "Option::is_none")]
     pub pwm_range: Option<Vec<u32>>,
     /// Fan speed range, when the device is a fan.
-    #[serde(default, rename = "fanSpeed", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fanSpeed", skip_serializing_if = "Option::is_none")]
     pub fan_speed: Option<u32>,
     /// How many logical devices the module exposes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub devices: Option<u32>,
 }
 
@@ -88,26 +84,22 @@ impl ModelConfig {
 #[serde(default)]
 pub struct UserConfig {
     /// Extended white range.
-    #[serde(default, rename = "extRange", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "extRange", skip_serializing_if = "Option::is_none")]
     pub ext_range: Option<Vec<u16>>,
     /// White range on older firmware.
-    #[serde(
-        default,
-        rename = "whiteRange",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(rename = "whiteRange", skip_serializing_if = "Option::is_none")]
     pub white_range: Option<Vec<u16>>,
     /// Default dimming.
-    #[serde(default, rename = "dftDim", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "dftDim", skip_serializing_if = "Option::is_none")]
     pub dft_dim: Option<u8>,
     /// Fade-in ms.
-    #[serde(default, rename = "fadeIn", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fadeIn", skip_serializing_if = "Option::is_none")]
     pub fade_in: Option<u32>,
     /// Fade-out ms.
-    #[serde(default, rename = "fadeOut", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fadeOut", skip_serializing_if = "Option::is_none")]
     pub fade_out: Option<u32>,
     /// Fan speed range on some models.
-    #[serde(default, rename = "fanSpeed", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "fanSpeed", skip_serializing_if = "Option::is_none")]
     pub fan_speed: Option<u32>,
 }
 
@@ -132,14 +124,16 @@ pub struct Power {
     pub power: u64,
 }
 
+/// The outer bounds of a reported range.
+///
+/// Firmware spells these several ways — `[min, max]` on `whiteRange`,
+/// `[min, preferred_min, preferred_max, max]` on a modern `cctRange` — so the
+/// smallest and largest entries are taken rather than the first and last.
+/// That is what `pywizlight` does (`min(kelvin_list)` / `max(kelvin_list)`),
+/// and it does not assume the bulb sorted the list.
 fn range_bounds(range: Option<&[u16]>) -> Option<(u16, u16)> {
     let range = range?;
-    match range {
-        [min, max] => Some((*min, *max)),
-        [min, _, _, max] => Some((*min, *max)),
-        [min, .., max] if range.len() > 1 => Some((*min, *max)),
-        _ => None,
-    }
+    Some((*range.iter().min()?, *range.iter().max()?))
 }
 
 #[cfg(test)]
@@ -176,5 +170,22 @@ mod tests {
     fn missing_kelvin_range_is_none_not_an_error() {
         let config: ModelConfig = serde_json::from_str(r#"{"wcr":20}"#).unwrap();
         assert_eq!(config.kelvin_range(), None);
+    }
+
+    #[test]
+    fn range_bounds_does_not_assume_the_list_is_sorted_or_four_long() {
+        assert_eq!(range_bounds(Some(&[2700, 6500])), Some((2700, 6500)));
+        assert_eq!(range_bounds(Some(&[6500, 2200, 2700])), Some((2200, 6500)));
+        assert_eq!(range_bounds(Some(&[2700])), Some((2700, 2700)));
+        assert_eq!(range_bounds(Some(&[])), None);
+        assert_eq!(range_bounds(None), None);
+    }
+
+    #[test]
+    fn a_single_temperature_model_reports_a_degenerate_range() {
+        // The socket fixture: `cctRange` is four copies of one value.
+        let config: ModelConfig =
+            serde_json::from_str(r#"{"cctRange":[2700,2700,2700,2700]}"#).unwrap();
+        assert_eq!(config.kelvin_range(), Some((2700, 2700)));
     }
 }
