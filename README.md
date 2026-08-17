@@ -113,11 +113,30 @@ to change that.
 
 ## CLI scaffold
 
-The binary installs and parses the CLI tree, including the global flags and the
-stable output contract. The actual bulb operations are still intentionally
-stubbed, and the command runner exits non-zero with a clear message while the
-protocol layer is implemented. It ships in the alphas so that packaging,
-installation and scripting hooks are exercised before the commands land.
+The binary installs, parses the command tree and renders output. **No command
+does anything to a bulb yet** — every one of them exits 1 with a message saying
+so. It ships in the alphas so that packaging and installation are exercised
+before the commands land.
+
+What does work is the plumbing around them:
+
+- Results go to stdout, everything else to stderr — logs, diagnostics and
+  errors, including the JSON ones. Redirect stdout and you get data or nothing.
+- `--json` renders errors as JSON too, so a script never has to parse prose.
+  The shape is not stable yet; it settles when the commands do.
+- `-v` raises the log level (`-v` info, `-vv` debug, `-vvv` trace) and
+  `RUST_LOG` overrides it entirely.
+- Colour is dropped when stderr is not a terminal, when `NO_COLOR` is set to
+  anything non-empty, and under `--json`.
+- Exit codes are 0 for success, 2 for a usage error, and 1 otherwise. The
+  distinct codes for *not found* and *timed out* arrive with the commands that
+  can produce them.
+- `-V`/`--version` reports the crate version, and `-h` and `--help` print the
+  same thing.
+
+`--timeout` and `--broadcast` are parsed and logged but nothing consumes them
+yet; they are listed here because they are part of the settled surface, not
+because they currently do anything.
 
 Installing it needs the version spelled out. `cargo install` resolves `*`, and
 `*` does not match a prerelease, so the bare form fails outright rather than

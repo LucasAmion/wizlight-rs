@@ -17,6 +17,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `get_model_config`, `get_user_config`, `get_power`, `reboot`, `reset`, and a
   `kelvin_range` helper that falls back from `getModelConfig` to `getUserConfig`
   on older firmware.
+- CLI: `--version` / `-V`. There was none at all — an installed binary could
+  not report which version it was.
+- CLI: `-v`/`-vv`/`-vvv` set the log level, overridable by `RUST_LOG`. Logs go
+  to stderr and are coloured only when stderr is a terminal, `NO_COLOR` is
+  unset, and `--json` was not given.
+- CLI: `--json` renders errors as JSON as well as results.
+
+### Changed
+
+- CLI: results go to stdout and everything else to stderr, so redirecting
+  stdout yields data or nothing at all. A failure used to print a payload to
+  stdout *and* an `anyhow` line to stderr, which meant `--json` emitted valid
+  JSON followed by prose on another stream.
+- CLI: a bare `wizlight` is a usage error (exit 2) rather than a success that
+  happens to print help. `main` returns an `ExitCode` so the code and the
+  rendered message are decided in one place.
+
+### Fixed
+
+- CLI: `wizlight --help` opened with "Global CLI flags shared across all
+  commands.", the Rust doc comment on the arg struct, while `-h` showed the
+  real description. clap promotes a doc comment to the long description unless
+  told not to.
+- CLI: `tracing-subscriber` was a dependency of the `cli` feature but nothing
+  used it, and `-v`/`--verbose` was parsed and discarded.
+- CLI: `color_disabled` was written, exported and never called, so
+  `tracing-subscriber` wrote ANSI escapes into pipes and log files.
 
 ### Notes on the pilot surface
 
