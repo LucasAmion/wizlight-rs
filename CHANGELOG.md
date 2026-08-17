@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CLI: `--version` / `-V`. There was none at all — an installed binary could
+  not report which version it was.
 - CLI: `-v`/`-vv`/`-vvv` set the log level, overridable by `RUST_LOG`. Logs go
   to stderr and are coloured only when stderr is a terminal, `NO_COLOR` is
   unset, and `--json` was not given.
@@ -26,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CLI: `wizlight --help` opened with "Global CLI flags shared across all
+  commands.", the Rust doc comment on the arg struct, while `-h` showed the
+  real description. clap promotes a doc comment to the long description unless
+  told not to.
 - CLI: `tracing-subscriber` was a dependency of the `cli` feature but nothing
   used it, and `-v`/`--verbose` was parsed and discarded.
 - CLI: `color_disabled` was written, exported and never called, so
