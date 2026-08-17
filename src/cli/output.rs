@@ -18,6 +18,12 @@ impl OutputRenderer for JsonRenderer {
 }
 
 /// Renderer for human-readable terminal output.
+///
+/// A string is emitted as-is, which is what the scaffold produces. Anything
+/// structured falls back to indented JSON until there are typed payloads worth
+/// laying out properly — the commands that will produce them do not exist yet,
+/// and a table formatter with nothing to format would only have to be guessed
+/// at twice.
 pub struct HumanRenderer;
 
 impl OutputRenderer for HumanRenderer {
@@ -30,12 +36,29 @@ impl OutputRenderer for HumanRenderer {
     }
 }
 
-/// Returns `true` when the output stream should disable ANSI colour.
-pub fn color_disabled() -> bool {
-    !io::stdout().is_terminal() || std::env::var_os("NO_COLOR").is_some()
-}
-
 /// Renders a JSON value in the stable scripting shape used by the CLI.
 pub fn render_json(value: &Value) -> String {
     JsonRenderer.render(value)
+}
+
+/// Whether ANSI colour is suppressed regardless of where output is going.
+///
+/// `--json` is machine-readable by definition, and [`NO_COLOR`] disables
+/// colour when it is present and non-empty, whatever its value.
+///
+/// [`NO_COLOR`]: https://no-color.org/
+fn colour_suppressed(json: bool) -> bool {
+    json || std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
+}
+
+/// Whether to colour output written to stderr — logs and errors.
+#[must_use]
+pub fn colour_on_stderr(json: bool) -> bool {
+    !colour_suppressed(json) && io::stderr().is_terminal()
+}
+
+/// Whether to colour output written to stdout — command results.
+#[must_use]
+pub fn colour_on_stdout(json: bool) -> bool {
+    !colour_suppressed(json) && io::stdout().is_terminal()
 }

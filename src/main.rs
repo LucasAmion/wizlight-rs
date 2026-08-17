@@ -3,6 +3,8 @@
 //! Everything lives in [`wizlight::cli`] so that argument parsing and output
 //! rendering are unit-testable; this binary is only the entry point.
 
-fn main() -> anyhow::Result<()> {
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
     wizlight::cli::run()
 }
