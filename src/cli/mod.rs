@@ -26,9 +26,16 @@ pub use output::{
 };
 
 /// Global CLI flags shared across all commands.
+///
+/// `-v` is verbosity and `-V` is the version, following `cargo`'s convention.
+///
+/// `long_about = None` keeps this doc comment out of `--help`. Without it clap
+/// promotes the comment to the long description, so `wizlight --help` opened
+/// with "Global CLI flags shared across all commands." while `-h` showed the
+/// real one — internal notes leaking into user-facing help.
 #[derive(Debug, Parser)]
 #[command(name = "wizlight", about = "Philips WiZ smart bulb control")]
-#[command(arg_required_else_help = true)]
+#[command(version, long_about = None, arg_required_else_help = true)]
 pub struct Cli {
     /// Emit JSON instead of human-readable output.
     #[arg(long, short = 'j', global = true, action = ArgAction::SetTrue)]

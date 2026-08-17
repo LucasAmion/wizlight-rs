@@ -103,6 +103,8 @@ What does work is the plumbing around them:
 - Exit codes are 0 for success, 2 for a usage error, and 1 otherwise. The
   distinct codes for *not found* and *timed out* arrive with the commands that
   can produce them.
+- `-V`/`--version` reports the crate version, and `-h` and `--help` print the
+  same thing.
 
 `--timeout` and `--broadcast` are parsed and logged but nothing consumes them
 yet; they are listed here because they are part of the settled surface, not
