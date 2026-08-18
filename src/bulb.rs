@@ -2,8 +2,10 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use crate::error::Result;
-use crate::protocol::{Request, Response};
+use crate::error::{Error, Result};
+use crate::protocol::{
+    ModelConfig, Pilot, PilotBuilder, Power, Request, Response, Success, SystemConfig, UserConfig,
+};
 use crate::transport::{RetryPolicy, Transport};
 
 /// The UDP port every WiZ device listens on.
@@ -17,12 +19,12 @@ pub const PORT: u16 = 38899;
 ///
 /// ```no_run
 /// use std::net::{IpAddr, Ipv4Addr};
-/// use wizlight::{Bulb, Request};
+/// use wizlight::Bulb;
 ///
 /// # async fn example() -> Result<(), wizlight::Error> {
 /// let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
-/// let pilot = bulb.request(&Request::new("getPilot")).await?;
-/// println!("{:?}", pilot.result);
+/// let pilot = bulb.get_pilot().await?;
+/// println!("{:?}", pilot.state);
 /// # Ok(())
 /// # }
 /// ```
@@ -89,6 +91,161 @@ impl Bulb {
         &self.policy
     }
 
+    /// Reads the bulb's current pilot state.
+    ///
+    /// # Errors
+    ///
+    /// See [`request`](Bulb::request).
+    pub async fn get_pilot(&self) -> Result<Pilot> {
+        self.request(&Request::new("getPilot"))
+            .await?
+            .parse_result()
+    }
+
+    /// Applies a pilot built with [`PilotBuilder`] via `setPilot`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidParam`] if the builder set no field or two
+    /// conflicting colour modes, [`Error::Device`] if the bulb acknowledged
+    /// with `success: false`, and otherwise whatever
+    /// [`request`](Bulb::request) returns.
+    pub async fn set_pilot(&self, pilot: &PilotBuilder) -> Result<()> {
+        self.write("setPilot", &pilot.set_pilot()?).await
+    }
+
+    /// Applies a pilot built with [`PilotBuilder`] via `setState`.
+    ///
+    /// Same params shape as [`set_pilot`](Bulb::set_pilot). On measured
+    /// firmware this still turns the bulb on when colour, temperature or a
+    /// scene is present.
+    ///
+    /// # Errors
+    ///
+    /// As [`set_pilot`](Bulb::set_pilot).
+    pub async fn set_state(&self, pilot: &PilotBuilder) -> Result<()> {
+        self.write("setState", &pilot.set_state()?).await
+    }
+
+    /// Reads `getSystemConfig`.
+    ///
+    /// # Errors
+    ///
+    /// See [`request`](Bulb::request).
+    pub async fn get_system_config(&self) -> Result<SystemConfig> {
+        self.request(&Request::new("getSystemConfig"))
+            .await?
+            .parse_result()
+    }
+
+    /// Reads `getModelConfig`.
+    ///
+    /// Older firmware answers with `-32601`; see
+    /// [`kelvin_range`](Bulb::kelvin_range) for the fallback path.
+    ///
+    /// # Errors
+    ///
+    /// See [`request`](Bulb::request).
+    pub async fn get_model_config(&self) -> Result<ModelConfig> {
+        self.request(&Request::new("getModelConfig"))
+            .await?
+            .parse_result()
+    }
+
+    /// Reads `getUserConfig`.
+    ///
+    /// # Errors
+    ///
+    /// See [`request`](Bulb::request).
+    pub async fn get_user_config(&self) -> Result<UserConfig> {
+        self.request(&Request::new("getUserConfig"))
+            .await?
+            .parse_result()
+    }
+
+    /// Reads `getPower` when the firmware implements it.
+    ///
+    /// On the measured `ESP25_SHRGB_01` the method exists and always returns
+    /// `0`. Treat the number as opaque until a given model is characterised.
+    ///
+    /// # Errors
+    ///
+    /// See [`request`](Bulb::request).
+    pub async fn get_power(&self) -> Result<Power> {
+        self.request(&Request::new("getPower"))
+            .await?
+            .parse_result()
+    }
+
+    /// Asks the bulb to reboot.
+    ///
+    /// **Measured on `ESP25_SHRGB_01` fw 1.38.0: this does not work.** The
+    /// bulb refuses it with `-32600 Invalid Request` — with `params: {}`, with
+    /// `params: null`, and with no `params` key at all — and carries on
+    /// running. So expect [`Error::Device`] from that model rather than a
+    /// reboot. The code matters: `-32601 Method not found` would mean the
+    /// firmware lacked the method, and it does not.
+    ///
+    /// The method is kept because other models and firmware may well
+    /// implement it — `pywizlight` exposes it, though it sends it and ignores
+    /// the reply, which is presumably why the refusal went unnoticed.
+    ///
+    /// **Fire and forget** as far as silence goes: a device that really did
+    /// reboot has an obvious reason not to answer, so a timeout is treated as
+    /// success. An explicit refusal is still an error.
+    ///
+    /// # Errors
+    ///
+    /// See [`request`](Bulb::request), less [`Error::Timeout`].
+    pub async fn reboot(&self) -> Result<()> {
+        self.fire_and_forget("reboot").await
+    }
+
+    /// Factory-resets the bulb, unpairing it and clearing its Wi-Fi
+    /// credentials. There is no way to undo this over the network.
+    ///
+    /// **Never measured, and deliberately not**: finding out what it returns
+    /// costs a bulb that has to be paired again from the app. Given
+    /// [`reboot`](Bulb::reboot) is refused outright on the hardware here, do
+    /// not assume this one works either.
+    ///
+    /// Fire and forget, for the reasons on [`reboot`](Bulb::reboot).
+    ///
+    /// # Errors
+    ///
+    /// See [`request`](Bulb::request), less [`Error::Timeout`].
+    pub async fn reset(&self) -> Result<()> {
+        self.fire_and_forget("reset").await
+    }
+
+    /// The bulb's usable Kelvin range.
+    ///
+    /// Tries `getModelConfig` first (firmware after 1.22). If that method is
+    /// missing, falls back to `getUserConfig`'s `extRange` / `whiteRange`.
+    /// Returns `None` only when neither source reports a range.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport and parse failures. A missing method is not an
+    /// error here — it is the reason to try the next source.
+    pub async fn kelvin_range(&self) -> Result<Option<(u16, u16)>> {
+        match self.get_model_config().await {
+            Ok(config) => {
+                if let Some(range) = config.kelvin_range() {
+                    return Ok(Some(range));
+                }
+            }
+            Err(Error::NotSupported { .. }) => {}
+            Err(err) => return Err(err),
+        }
+
+        match self.get_user_config().await {
+            Ok(config) => Ok(config.kelvin_range()),
+            Err(Error::NotSupported { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Sends a request and waits for the bulb's answer.
     ///
     /// Retries per the [`RetryPolicy`]. Replies from anywhere else, and
@@ -112,6 +269,33 @@ impl Bulb {
         self.transport
             .exchange(self.addr, request, &self.policy)
             .await
+    }
+
+    /// Sends a write and insists the bulb actually accepted it.
+    ///
+    /// `{"success": false}` has not been observed on any bulb here, but it is
+    /// the shape the protocol allows for a refusal that is not an `error`
+    /// envelope, and a write that silently did nothing is the one outcome a
+    /// caller must not miss.
+    async fn write(&self, method: &str, request: &Request) -> Result<()> {
+        let ack: Success = self.request(request).await?.parse_result()?;
+        if ack.success {
+            Ok(())
+        } else {
+            Err(Error::Device {
+                method: method.to_owned(),
+                code: 0,
+                message: "bulb acknowledged with `success: false`".to_owned(),
+            })
+        }
+    }
+
+    /// Sends a request whose reply, if any, is not worth waiting for.
+    async fn fire_and_forget(&self, method: &str) -> Result<()> {
+        match self.request(&Request::new(method)).await {
+            Ok(_) | Err(Error::Timeout { .. }) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 }
 

@@ -9,10 +9,11 @@ real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
 > **Status: early development, and the published versions are alphas.** The
-> request/response transport and discovery are in; the CLI now has a parser and
-> global flags, but the actual protocol-backed commands are still intentionally
-> stubbed and return a non-zero error until the rest of the command surface is
-> wired up. The API will change without warning until `0.1.0`.
+> request/response transport, discovery and typed pilot/config methods are in;
+> the CLI now has a parser and global flags, but the actual protocol-backed
+> commands are still intentionally stubbed and return a non-zero error until the
+> rest of the command surface is wired up. The API will change without warning
+> until `0.1.0`.
 >
 > Alphas are published to keep the release path exercised rather than to be
 > depended on, so **every version below has to be spelled out in full**. Cargo
@@ -24,8 +25,8 @@ real-time control, and it is the protocol layer underneath
 
 - ~~Discovery by UDP broadcast~~ — done, though the CLI does not yet detect the
   broadcast address from the local interfaces
-- `getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
-  requests and responses
+- ~~`getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
+  requests and responses~~ — done
 - Bulb model parsing: capabilities, scene support and Kelvin range
 - RGB ↔ RGB+CW conversion, cross-checked against `pywizlight`
 - A rate-limited streaming path for driving bulbs from live audio or video
@@ -48,15 +49,42 @@ that `cargo install wizlight` produces a working binary, and it pulls in `clap`,
 ```rust,no_run
 use std::net::{IpAddr, Ipv4Addr};
 
-use wizlight::{Bulb, Request};
+use wizlight::protocol::{Channel, Dimming, PilotBuilder};
+use wizlight::Bulb;
 
 #[tokio::main]
 async fn main() -> Result<(), wizlight::Error> {
     let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
-    let pilot = bulb.request(&Request::new("getPilot")).await?;
-    println!("{:?}", pilot.result);
+
+    let pilot = bulb.get_pilot().await?;
+    println!("on={:?}, dimming={:?}", pilot.state, pilot.dimming);
+
+    bulb.set_pilot(
+        &PilotBuilder::new()
+            .rgb(Channel::new(255), Channel::new(80), Channel::new(0))
+            .dimming(Dimming::new(40)?),
+    )
+    .await?;
     Ok(())
 }
+```
+
+Every channel value is a valid one, so `Channel::new` cannot fail. The types
+that *do* have a range — `Dimming`, `Kelvin`, `Speed`, `Ratio`, `Devices` —
+return a `Result`, because the bulb is not a reliable validator: it silently
+clamps an out-of-range `dimming` and reports success.
+
+Colour, colour temperature and scene are mutually exclusive in one request, and
+asking for two of them fails at build time rather than silently picking one:
+
+```rust
+use wizlight::protocol::{Channel, Kelvin, PilotBuilder};
+
+let clash = PilotBuilder::new()
+    .rgb(Channel::new(255), Channel::new(0), Channel::new(0))
+    .temp(Kelvin::new(2700).expect("2700 K is in range"))
+    .set_pilot();
+assert!(clash.is_err());
 ```
 
 Bulbs are found by broadcasting, and reported as they answer rather than in a

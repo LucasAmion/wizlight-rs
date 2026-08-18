@@ -17,9 +17,24 @@
 //! returns seven `getModelConfig` fields that no `pywizlight` fixture has — so
 //! `deny_unknown_fields` anywhere in the parse path would turn a firmware
 //! update into a broken client.
+//!
+//! The same rule applies to *values*, which is why results carry plain
+//! integers while requests carry validated newtypes like [`Dimming`]. The
+//! write-side bounds are what one firmware was measured to accept or usefully
+//! honour, and they are not a promise about what any bulb will *report*: the
+//! hardware here accepts `dimming: 0`, clamps it, and answers `success`, so a
+//! model that reported the unclamped value back would be entirely within the
+//! protocol. A result type enforcing the write bound would turn that into a
+//! parse failure, and a firmware update into a broken client.
 
+mod config;
+mod pilot;
 mod request;
 mod response;
+mod types;
 
+pub use config::{ModelConfig, Power, SystemConfig, UserConfig};
+pub use pilot::{Pilot, PilotBuilder, PilotParams, Success};
 pub use request::Request;
 pub use response::{DeviceError, Response};
+pub use types::{Channel, Devices, Dimming, Kelvin, Ratio, SceneId, Speed};

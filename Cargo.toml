@@ -52,6 +52,13 @@ required-features = ["cli"]
 # needed to produce one.
 futures-core = "0.3.31"
 serde = { version = "1.0.229", features = ["derive"] }
+# Deliberately *not* `preserve_order`. It would keep `Request`'s params in
+# declaration order on the wire, but cargo feature unification would then
+# impose an IndexMap-backed `serde_json::Map` on every other crate in a
+# consumer's build. Measured on ESP25_SHRGB_01 fw 1.38.0: key order makes no
+# difference — `{"r":255,"g":80,"b":0,"dimming":40}` and the same object sorted
+# alphabetically are both accepted and produce identical state. So the wire
+# tests compare parsed JSON rather than bytes.
 serde_json = "1.0.151"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", default-features = false, features = [
