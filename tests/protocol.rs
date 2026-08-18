@@ -289,15 +289,34 @@ async fn kelvin_range_falls_back_to_user_config() {
 }
 
 #[tokio::test]
-async fn get_power_and_maintenance_methods() {
+async fn get_power_is_answered_by_this_model() {
     let bulb = MockBulb::start().await;
     let client = connect(&bulb).await;
 
     let power = client.get_power().await.expect("power");
     assert_eq!(power.power, 0);
+}
 
-    client.reboot().await.expect("reboot");
-    client.reset().await.expect("reset");
+#[tokio::test]
+async fn reboot_is_refused_by_the_hardware_and_says_so() {
+    // Measured on ESP25_SHRGB_01 fw 1.38.0: `reboot` comes back -32600
+    // Invalid Request and the bulb does not reboot. Not -32601, so the
+    // firmware knows the method and declines it. The harness answers the same
+    // way, and this test exists so nobody "fixes" it back to success.
+    let bulb = MockBulb::start().await;
+    let client = connect(&bulb).await;
+
+    let err = client
+        .reboot()
+        .await
+        .expect_err("the hardware refuses reboot");
+    assert!(
+        matches!(&err, Error::Device { code: -32600, method, .. } if method == "reboot"),
+        "{err}"
+    );
+    // A refusal must not be mistaken for the silence that fire-and-forget
+    // forgives.
+    assert!(!matches!(err, Error::Timeout { .. }));
 
     let sent: Vec<Value> = bulb
         .requests()
@@ -305,14 +324,23 @@ async fn get_power_and_maintenance_methods() {
         .map(|r| serde_json::from_str(r).expect("requests are JSON"))
         .collect();
     assert!(sent.contains(&json!({"method": "reboot", "params": {}})));
-    assert!(sent.contains(&json!({"method": "reset", "params": {}})));
 }
 
 #[tokio::test]
-async fn reboot_and_reset_forgive_a_bulb_that_says_nothing() {
-    // Neither method has been run against hardware, and a device that is
-    // rebooting or wiping itself has every reason not to answer. Silence must
-    // not look like a failure. Nothing is bound to this address.
+async fn reset_is_assumed_to_behave_like_reboot() {
+    // Untested on hardware, and staying that way: measuring a factory reset
+    // costs a re-paired bulb.
+    let bulb = MockBulb::start().await;
+    let client = connect(&bulb).await;
+
+    let err = client.reset().await.expect_err("assumed refused");
+    assert!(matches!(err, Error::Device { code: -32600, .. }), "{err}");
+}
+
+#[tokio::test]
+async fn silence_is_still_forgiven_for_reboot_and_reset() {
+    // The other half of fire-and-forget: a bulb that really did reboot has an
+    // obvious reason not to answer. Nothing is bound to this address.
     let dead = {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
         socket.local_addr().expect("local_addr")

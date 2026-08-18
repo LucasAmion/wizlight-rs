@@ -728,8 +728,10 @@ mod tests {
 
     #[test]
     fn a_reported_value_the_builder_would_refuse_still_parses() {
-        // The bulb reports `dimming: 0` on some off bulbs, which `Dimming`
-        // rejects. Results must not inherit the write-side bound.
+        // `Dimming` refuses 0, so parsing must not. The measured hardware
+        // clamps and never reports 0 itself, but it does *accept* 0, so a
+        // model that echoed it back would still be within the protocol —
+        // results must not inherit the write-side bound.
         let pilot: Pilot = serde_json::from_str(r#"{"state":false,"dimming":0}"#).unwrap();
         assert_eq!(pilot.dimming, Some(0));
     }

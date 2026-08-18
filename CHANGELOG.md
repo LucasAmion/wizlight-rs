@@ -45,6 +45,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: `color_disabled` was written, exported and never called, so
   `tracing-subscriber` wrote ANSI escapes into pipes and log files.
 
+### Measured against hardware
+
+Every parameter range below was swept to its edges on two `ESP25_SHRGB_01`
+bulbs running firmware 1.38.0, which agreed on all of it. Three of the values
+inherited from `pywizlight` turned out to be wrong.
+
+- `Kelvin` accepts `1000..=12000`, was `1000..=10000`. The crate was refusing
+  temperatures the bulb takes.
+- `Dimming` still enforces `1..=100`, but that is a **client-side policy, not a
+  wire bound**: the bulb accepts every `u8` and silently clamps. The previous
+  claim that `0` is "out of range on the wire" was wrong.
+- `SceneId` docs claimed custom slots at `256..=265` and Rhythm at `1000`. Both
+  are **refused** on this firmware; a write is accepted for `1..=248`.
+  Construction stays infallible — that bound is one firmware's.
+- `Speed` `10..=200`, `Ratio` `0..=100` and `Devices` `1..=3` were all correct,
+  and are no longer marked unverified. `3` working on a single-head bulb where
+  `2` does not is the evidence for `3` meaning "every head".
+- `getPilot` addresses heads **zero-based** while replies tag them one-based,
+  confirming `Devices` must not be reused for reads.
+- Key order inside `params` makes no difference, which is what justifies not
+  enabling `serde_json/preserve_order`.
+- `success: false` could not be provoked by any means tried; every failure is
+  an `error` envelope. Handling it remains defensive against an unobserved case.
+
 ### Notes on the pilot surface
 
 - Colour, colour temperature and scene are **mutually exclusive, and a builder
@@ -56,9 +80,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on an off bulb — and a validating parse would turn that into an error.
 - `Channel` and `SceneId` construction is infallible, so it does not return a
   `Result` that can never be `Err`.
-- `reboot` and `reset` are fire-and-forget: they return `()` and treat a
-  timeout as success. Neither has been run against hardware, and a device that
-  is rebooting or clearing its credentials has every reason not to answer.
+- `reboot` **does not work on the measured hardware**: it is refused with
+  `-32600 Invalid Request` in every spelling of `params`, and the bulb keeps
+  running. Not `-32601`, so the firmware knows the method and declines it. The
+  method is kept for models that may implement it, and now returns
+  `Error::Device` there rather than pretending to succeed — the mock bulb was
+  previously inventing a `{"success": true}` no hardware has ever sent.
+  `reset` is untested and assumed to match.
+- `reboot` and `reset` stay fire-and-forget for *silence*: a device that really
+  did reboot has an obvious reason not to answer, so a timeout is success while
+  an explicit refusal is not.
 - `set_pilot` / `set_state` return `()` and raise `Error::Device` if the bulb
   acknowledges with `success: false`, rather than handing back an ack that is
   easy to ignore.

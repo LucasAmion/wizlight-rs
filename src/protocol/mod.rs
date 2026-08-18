@@ -19,10 +19,13 @@
 //! update into a broken client.
 //!
 //! The same rule applies to *values*, which is why results carry plain
-//! integers while requests carry validated newtypes like [`Dimming`]. A bulb
-//! may report a value it would refuse to be sent — `dimming: 0` is the known
-//! case — and a result type that enforced the write-side bound would turn that
-//! into a parse failure.
+//! integers while requests carry validated newtypes like [`Dimming`]. The
+//! write-side bounds are what one firmware was measured to accept or usefully
+//! honour, and they are not a promise about what any bulb will *report*: the
+//! hardware here accepts `dimming: 0`, clamps it, and answers `success`, so a
+//! model that reported the unclamped value back would be entirely within the
+//! protocol. A result type enforcing the write bound would turn that into a
+//! parse failure, and a firmware update into a broken client.
 
 mod config;
 mod pilot;

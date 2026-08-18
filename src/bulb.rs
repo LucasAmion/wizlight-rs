@@ -179,12 +179,20 @@ impl Bulb {
 
     /// Asks the bulb to reboot.
     ///
-    /// **Fire and forget.** Neither this nor [`reset`](Bulb::reset) has been
-    /// run against hardware, and a device that is rebooting or wiping itself
-    /// has an obvious reason not to answer — so a timeout is treated as
-    /// success here rather than reported as a failure. `pywizlight` sends both
-    /// and ignores the reply entirely. If a bulb does acknowledge, a refusal
-    /// is still surfaced: only silence is forgiven.
+    /// **Measured on `ESP25_SHRGB_01` fw 1.38.0: this does not work.** The
+    /// bulb refuses it with `-32600 Invalid Request` — with `params: {}`, with
+    /// `params: null`, and with no `params` key at all — and carries on
+    /// running. So expect [`Error::Device`] from that model rather than a
+    /// reboot. The code matters: `-32601 Method not found` would mean the
+    /// firmware lacked the method, and it does not.
+    ///
+    /// The method is kept because other models and firmware may well
+    /// implement it — `pywizlight` exposes it, though it sends it and ignores
+    /// the reply, which is presumably why the refusal went unnoticed.
+    ///
+    /// **Fire and forget** as far as silence goes: a device that really did
+    /// reboot has an obvious reason not to answer, so a timeout is treated as
+    /// success. An explicit refusal is still an error.
     ///
     /// # Errors
     ///
@@ -195,6 +203,11 @@ impl Bulb {
 
     /// Factory-resets the bulb, unpairing it and clearing its Wi-Fi
     /// credentials. There is no way to undo this over the network.
+    ///
+    /// **Never measured, and deliberately not**: finding out what it returns
+    /// costs a bulb that has to be paired again from the app. Given
+    /// [`reboot`](Bulb::reboot) is refused outright on the hardware here, do
+    /// not assume this one works either.
     ///
     /// Fire and forget, for the reasons on [`reboot`](Bulb::reboot).
     ///

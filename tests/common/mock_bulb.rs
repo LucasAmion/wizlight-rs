@@ -32,13 +32,18 @@
 //! `pywizlight` or from the documented parameter ranges and has **not** been
 //! confirmed against hardware.
 //!
-//! `reboot` and `reset` are the sharpest case of that. Both are answered here
-//! with `{"success": true}`, and **nothing** backs that up: there is no capture
-//! of either, `pywizlight` fires them and ignores the reply, and a bulb that is
-//! rebooting or clearing its own credentials has every reason to say nothing at
-//! all. The client therefore treats silence as success, and this reply exists
-//! only so the acknowledging case is exercised too — do not read it as evidence
-//! that hardware acknowledges.
+//! `reboot` used to be the sharpest case of that: this harness answered it with
+//! an invented `{"success": true}`. It has since been measured, and the truth is
+//! neither an acknowledgement nor silence — the bulb **refuses it** with
+//! `-32600 Invalid Request`, in every spelling of `params`, and carries on
+//! answering without rebooting. Note the code: `-32601 Method not found` would
+//! mean the firmware lacked the method, and it does not. `pywizlight` sends
+//! `reboot` and ignores the reply, which is presumably why nobody noticed.
+//!
+//! `reset` is **not** measured and never will be here: it is a factory reset
+//! that unpairs the bulb and clears its Wi-Fi credentials. It is assumed to
+//! behave like `reboot`, and that assumption is the only guess left in this
+//! file's write path.
 //!
 //! The bulb binds `0.0.0.0`, not `127.0.0.1`: a loopback-bound socket never
 //! receives broadcast, which discovery tests depend on.
@@ -518,16 +523,10 @@ impl Shared {
                     push_first: state.push_first,
                 }
             }
-            // Assumed, not measured — see the fidelity notes at the top of the
-            // module. Real hardware may well answer nothing.
-            "reboot" | "reset" => reply(
-                latency,
-                json!({
-                    "method": method,
-                    "env": "pro",
-                    "result": {"success": true},
-                }),
-            ),
+            // Measured: `reboot` is refused with -32600 in every params shape,
+            // and the bulb does not reboot. `reset` is untested and assumed to
+            // match. See the fidelity notes at the top of the module.
+            "reboot" | "reset" => reply(latency, error(method, -32600, "Invalid Request")),
             "setPilot" | "setState" => match apply(&mut state.pilot, request.get("params")) {
                 Err((code, message)) => reply(latency, error(method, code, &message)),
                 Ok(()) => {
