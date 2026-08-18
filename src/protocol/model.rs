@@ -512,25 +512,24 @@ impl BulbType {
         // does not know its own module reports the key as missing, but an
         // empty string means exactly as much.
         let name = data.module_name.filter(|name| !name.is_empty());
-        let (module_name, derivation) = match (name, data.type_id) {
-            (Some(name), _) => (Some(ModuleName::parse(name)?), Derivation::ModuleName),
-            (None, Some(type_id)) if class_for_type_id(type_id).is_some() => {
-                (None, Derivation::KnownTypeId(type_id))
+        let (module_name, class, derivation) = match (name, data.type_id) {
+            (Some(name), _) => {
+                let module = ModuleName::parse(name)?;
+                let class = module.class();
+                (Some(module), class, Derivation::ModuleName)
             }
-            (None, Some(type_id)) => (None, Derivation::AssumedTypeId(type_id)),
+            (None, Some(type_id)) => match class_for_type_id(type_id) {
+                Some(class) => (None, class, Derivation::KnownTypeId(type_id)),
+                // Every WiZ device can at least be dimmed, so dimmable white
+                // is a floor rather than a description. `derivation` is what
+                // says which of the two this is.
+                None => (None, BulbClass::Dw, Derivation::AssumedTypeId(type_id)),
+            },
             (None, None) => {
                 return Err(Error::UnknownModel {
                     message: "the device reported neither a moduleName nor a typeId".to_owned(),
                 });
             }
-        };
-
-        let class = match (&module_name, derivation) {
-            (Some(module), _) => module.class(),
-            (None, Derivation::KnownTypeId(type_id)) => {
-                class_for_type_id(type_id).unwrap_or(BulbClass::Dw)
-            }
-            (None, _) => BulbClass::Dw,
         };
         let heads = module_name.as_ref().and_then(ModuleName::heads);
 
