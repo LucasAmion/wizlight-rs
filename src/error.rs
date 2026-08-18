@@ -64,6 +64,17 @@ pub enum Error {
         method: String,
     },
 
+    /// The device could not be described from what it reported about itself.
+    ///
+    /// Its `moduleName` was missing or unreadable and no `typeId` stood in for
+    /// it, or its class must report a Kelvin range and none did. See
+    /// [`BulbType::from_data`](crate::protocol::BulbType::from_data).
+    #[error("unknown model: {message}")]
+    UnknownModel {
+        /// What was missing, and from where.
+        message: String,
+    },
+
     /// A parameter was out of range or otherwise unacceptable.
     ///
     /// Returned for the bulb's `-32602 Invalid params` and by client-side

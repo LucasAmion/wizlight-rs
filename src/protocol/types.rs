@@ -160,8 +160,11 @@ bounded_newtype! {
     /// with `-32602`, `1000` and `12000` are accepted.
     ///
     /// This is the **wire** bound, and it is far wider than any bulb's usable
-    /// range: the same hardware reports a `cctRange` of 2200–6500 and then
-    /// accepts `12000` anyway, clamping it. For the range that actually means
+    /// range: the same hardware reports a `cctRange` of 2200–6500, accepts
+    /// `12000`, and then reports `6500` back. Everything inside the wire bound
+    /// is clamped into the model's own range, in both directions — `1000`
+    /// reads back as `2200` — so an acknowledgement says nothing about the
+    /// temperature having been honoured. For the range that actually means
     /// something, ask [`ModelConfig`](super::ModelConfig) /
     /// [`UserConfig`](super::UserConfig), or
     /// [`Bulb::kelvin_range`](crate::Bulb::kelvin_range).

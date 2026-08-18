@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::KelvinRange;
+
 /// `getSystemConfig` result.
 ///
 /// Unknown fields are ignored. Older firmware omits several of the keys the
@@ -21,7 +23,8 @@ pub struct SystemConfig {
     /// Region code, e.g. `eu`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rgn: Option<String>,
-    /// Module name, e.g. `ESP25_SHRGB_01`. Capability parsing is a later concern.
+    /// Module name, e.g. `ESP25_SHRGB_01`. What the device can do is derived
+    /// from this; see [`BulbType`](super::BulbType).
     #[serde(rename = "moduleName", skip_serializing_if = "Option::is_none")]
     pub module_name: Option<String>,
     /// Firmware version string.
@@ -36,6 +39,26 @@ pub struct SystemConfig {
     /// Type id on some older firmware.
     #[serde(rename = "typeId", skip_serializing_if = "Option::is_none")]
     pub type_id: Option<u32>,
+}
+
+impl SystemConfig {
+    /// White-to-colour ratio from `drvConf`, whose two entries are
+    /// `[white_to_color_ratio, white_channels]`.
+    ///
+    /// Only firmware before 1.22 reports it; after that the same numbers live
+    /// in `getModelConfig` as `wcr` and `nowc`. The measured
+    /// `ESP25_SHRGB_01` on 1.38.0 sends no `drvConf` at all.
+    #[must_use]
+    pub fn white_to_color_ratio(&self) -> Option<u32> {
+        self.drv_conf.as_ref()?.first().copied()
+    }
+
+    /// How many white emitters `drvConf` reports: 1 for warm-only, 2 for warm
+    /// and cold. See [`white_to_color_ratio`](SystemConfig::white_to_color_ratio).
+    #[must_use]
+    pub fn white_channels(&self) -> Option<u32> {
+        self.drv_conf.as_ref()?.get(1).copied()
+    }
 }
 
 /// `getModelConfig` result (firmware &gt; 1.22).
@@ -71,7 +94,7 @@ impl ModelConfig {
     /// Uses the outer bounds of the four-element form
     /// `[min, preferred_min, preferred_max, max]`.
     #[must_use]
-    pub fn kelvin_range(&self) -> Option<(u16, u16)> {
+    pub fn kelvin_range(&self) -> Option<KelvinRange> {
         range_bounds(self.cct_range.as_deref())
     }
 }
@@ -106,7 +129,7 @@ pub struct UserConfig {
 impl UserConfig {
     /// The white/Kelvin range from `extRange`, falling back to `whiteRange`.
     #[must_use]
-    pub fn kelvin_range(&self) -> Option<(u16, u16)> {
+    pub fn kelvin_range(&self) -> Option<KelvinRange> {
         range_bounds(self.ext_range.as_deref())
             .or_else(|| range_bounds(self.white_range.as_deref()))
     }
@@ -131,9 +154,9 @@ pub struct Power {
 /// smallest and largest entries are taken rather than the first and last.
 /// That is what `pywizlight` does (`min(kelvin_list)` / `max(kelvin_list)`),
 /// and it does not assume the bulb sorted the list.
-fn range_bounds(range: Option<&[u16]>) -> Option<(u16, u16)> {
+fn range_bounds(range: Option<&[u16]>) -> Option<KelvinRange> {
     let range = range?;
-    Some((*range.iter().min()?, *range.iter().max()?))
+    Some(KelvinRange::new(*range.iter().min()?, *range.iter().max()?))
 }
 
 #[cfg(test)]
@@ -154,7 +177,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.wcr, Some(80));
-        assert_eq!(config.kelvin_range(), Some((2200, 6500)));
+        assert_eq!(config.kelvin_range(), Some(KelvinRange::new(2200, 6500)));
     }
 
     #[test]
@@ -163,7 +186,7 @@ mod tests {
             r#"{"whiteRange":[2700,6500],"extRange":[2200,6500],"dftDim":100}"#,
         )
         .unwrap();
-        assert_eq!(config.kelvin_range(), Some((2200, 6500)));
+        assert_eq!(config.kelvin_range(), Some(KelvinRange::new(2200, 6500)));
     }
 
     #[test]
@@ -174,9 +197,18 @@ mod tests {
 
     #[test]
     fn range_bounds_does_not_assume_the_list_is_sorted_or_four_long() {
-        assert_eq!(range_bounds(Some(&[2700, 6500])), Some((2700, 6500)));
-        assert_eq!(range_bounds(Some(&[6500, 2200, 2700])), Some((2200, 6500)));
-        assert_eq!(range_bounds(Some(&[2700])), Some((2700, 2700)));
+        assert_eq!(
+            range_bounds(Some(&[2700, 6500])),
+            Some(KelvinRange::new(2700, 6500))
+        );
+        assert_eq!(
+            range_bounds(Some(&[6500, 2200, 2700])),
+            Some(KelvinRange::new(2200, 6500))
+        );
+        assert_eq!(
+            range_bounds(Some(&[2700])),
+            Some(KelvinRange::new(2700, 2700))
+        );
         assert_eq!(range_bounds(Some(&[])), None);
         assert_eq!(range_bounds(None), None);
     }
@@ -186,6 +218,6 @@ mod tests {
         // The socket fixture: `cctRange` is four copies of one value.
         let config: ModelConfig =
             serde_json::from_str(r#"{"cctRange":[2700,2700,2700,2700]}"#).unwrap();
-        assert_eq!(config.kelvin_range(), Some((2700, 2700)));
+        assert_eq!(config.kelvin_range(), Some(KelvinRange::new(2700, 2700)));
     }
 }

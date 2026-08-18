@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use common::mock_bulb::{MockBulb, Personality};
 use serde_json::{Value, json};
-use wizlight::protocol::{Channel, Devices, Dimming, Kelvin, PilotBuilder, Ratio, SceneId, Speed};
+use wizlight::protocol::{
+    BulbClass, Channel, Derivation, Devices, Dimming, Kelvin, KelvinRange, PilotBuilder, Ratio,
+    SceneId, Speed,
+};
 use wizlight::{Bulb, Error, RetryPolicy};
 
 async fn connect(bulb: &MockBulb) -> Bulb {
@@ -166,7 +169,7 @@ async fn a_dimmable_white_bulb_takes_dimming_and_reports_its_range() {
     // No getModelConfig on 1.11.7, so the range comes from getUserConfig.
     assert_eq!(
         client.kelvin_range().await.expect("range"),
-        Some((2700, 6500))
+        Some(KelvinRange::new(2700, 6500))
     );
 }
 
@@ -231,7 +234,7 @@ async fn system_model_and_user_config_parse() {
     assert_eq!(system.mac.as_deref(), Some(bulb.mac()));
 
     let model = client.get_model_config().await.expect("model");
-    assert_eq!(model.kelvin_range(), Some((2200, 6500)));
+    assert_eq!(model.kelvin_range(), Some(KelvinRange::new(2200, 6500)));
     assert_eq!(model.wcr, Some(80));
 
     let user = client.get_user_config().await.expect("user");
@@ -244,7 +247,7 @@ async fn kelvin_range_uses_model_config_when_present() {
     let client = connect(&bulb).await;
     assert_eq!(
         client.kelvin_range().await.expect("range"),
-        Some((2200, 6500))
+        Some(KelvinRange::new(2200, 6500))
     );
 }
 
@@ -264,7 +267,7 @@ async fn kelvin_range_reads_a_legacy_model_config() {
     ));
     assert_eq!(
         client.kelvin_range().await.expect("range"),
-        Some((2200, 6500))
+        Some(KelvinRange::new(2200, 6500))
     );
 }
 
@@ -284,7 +287,162 @@ async fn kelvin_range_falls_back_to_user_config() {
 
     assert_eq!(
         client.kelvin_range().await.expect("range"),
-        Some((2700, 6500))
+        Some(KelvinRange::new(2700, 6500))
+    );
+}
+
+#[tokio::test]
+async fn bulb_type_describes_the_measured_hardware() {
+    // ESP25_SHRGB_01 on 1.38.0. Its getSystemConfig carries neither `drvConf`
+    // nor `typeId`, so everything but the module name comes from
+    // getModelConfig: `nowc`, `wcr` and the `cctRange` of 2200-6500.
+    let bulb = MockBulb::start().await;
+    let client = connect(&bulb).await;
+
+    let bulb_type = client.bulb_type().await.expect("bulb type");
+    assert_eq!(bulb_type.class, BulbClass::Rgb);
+    assert_eq!(bulb_type.derivation, Derivation::ModuleName);
+    assert_eq!(
+        bulb_type.module_name.as_ref().map(ToString::to_string),
+        Some("ESP25_SHRGB_01".to_owned())
+    );
+    assert_eq!(bulb_type.fw_version.as_deref(), Some("1.38.0"));
+    assert_eq!(bulb_type.kelvin_range, Some(KelvinRange::new(2200, 6500)));
+    assert_eq!(bulb_type.white_channels, Some(1));
+    assert_eq!(bulb_type.white_to_color_ratio, Some(80));
+    assert_eq!(bulb_type.fan_speed_range, None);
+
+    let features = bulb_type.features;
+    assert!(features.color && features.color_tmp && features.effect && features.brightness);
+    assert!(!features.dual_head && !features.fan);
+}
+
+#[tokio::test]
+async fn bulb_type_reads_white_channels_from_drv_conf_on_old_firmware() {
+    // ESP14_SHTW1C_01 on 1.18.0: no getModelConfig, so `nowc` and `wcr` are
+    // only available as the two entries of `drvConf`, and the Kelvin range
+    // only from getUserConfig.
+    let bulb = MockBulb::builder()
+        .personality(Personality::tunable_white())
+        .start()
+        .await;
+    let bulb_type = connect(&bulb).await.bulb_type().await.expect("bulb type");
+
+    assert_eq!(bulb_type.class, BulbClass::Tw);
+    assert_eq!(bulb_type.kelvin_range, Some(KelvinRange::new(2700, 6500)));
+    assert_eq!(bulb_type.white_channels, Some(1));
+    assert_eq!(bulb_type.white_to_color_ratio, Some(20));
+    assert!(!bulb_type.features.color && bulb_type.features.color_tmp);
+}
+
+#[tokio::test]
+async fn bulb_type_of_a_dual_head_bulb_reports_two_heads() {
+    let bulb = MockBulb::builder()
+        .personality(Personality::dual_head())
+        .start()
+        .await;
+    let bulb_type = connect(&bulb).await.bulb_type().await.expect("bulb type");
+
+    assert_eq!(bulb_type.class, BulbClass::Rgb);
+    assert!(bulb_type.features.dual_head);
+    // `nowc` from getModelConfig wins over the `drvConf` of [30, 1] that the
+    // same bulb's getSystemConfig still carries.
+    assert_eq!(bulb_type.white_channels, Some(2));
+    assert_eq!(bulb_type.white_to_color_ratio, Some(20));
+}
+
+#[tokio::test]
+async fn a_socket_has_nothing_to_dim() {
+    let bulb = MockBulb::builder()
+        .personality(Personality::socket())
+        .start()
+        .await;
+    let bulb_type = connect(&bulb).await.bulb_type().await.expect("bulb type");
+
+    assert_eq!(bulb_type.class, BulbClass::Socket);
+    let features = bulb_type.features;
+    assert!(!features.brightness && !features.color && !features.color_tmp && !features.effect);
+}
+
+#[tokio::test]
+async fn a_fan_reports_its_speed_range() {
+    let bulb = MockBulb::builder()
+        .personality(Personality::fan())
+        .start()
+        .await;
+    let bulb_type = connect(&bulb).await.bulb_type().await.expect("bulb type");
+
+    assert_eq!(bulb_type.class, BulbClass::FanDim);
+    assert_eq!(bulb_type.fan_speed_range, Some(6));
+    // A single-temperature light: the range is four copies of one value.
+    assert_eq!(bulb_type.kelvin_range, Some(KelvinRange::new(2700, 2700)));
+    assert!(bulb_type.features.fan && bulb_type.features.brightness);
+    assert!(!bulb_type.features.effect && !bulb_type.features.color_tmp);
+}
+
+#[tokio::test]
+async fn firmware_too_old_for_a_module_name_falls_back_to_its_type_id() {
+    // 1.8.0 reports no moduleName at all, so the class comes from `typeId: 0`
+    // and the white channel count from `drvConf: [20, 1]`.
+    let bulb = MockBulb::builder()
+        .personality(Personality::firmware_1_8_0())
+        .start()
+        .await;
+    let bulb_type = connect(&bulb).await.bulb_type().await.expect("bulb type");
+
+    assert_eq!(bulb_type.class, BulbClass::Dw);
+    assert_eq!(bulb_type.derivation, Derivation::KnownTypeId(0));
+    assert_eq!(bulb_type.module_name, None);
+    assert_eq!(bulb_type.white_channels, Some(1));
+    assert_eq!(bulb_type.white_to_color_ratio, Some(20));
+    assert!(bulb_type.features.brightness && bulb_type.features.effect);
+
+    // `pywizlight` reports no range for this fixture, because it reads
+    // `extRange` and `cctRange` only while 1.8.0 sends `whiteRange`. Reading
+    // the range the bulb did send is a deliberate difference: a reported
+    // range beats no range at all.
+    assert_eq!(bulb_type.kelvin_range, Some(KelvinRange::new(2700, 2700)));
+}
+
+#[tokio::test]
+async fn a_bulb_that_cannot_describe_itself_says_so() {
+    // Neither a moduleName nor a typeId, and then a module name with no
+    // identifier token in it. Both are refused rather than guessed at.
+    for system_config in [
+        r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"9877d5230f0a","fwVersion":"1.38.0"}}"#,
+        r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"9877d5230f0a","moduleName":"INVALID","fwVersion":"1.38.0"}}"#,
+    ] {
+        let bulb = MockBulb::builder()
+            .personality(Personality::rgb().with_system_config(system_config))
+            .start()
+            .await;
+        let err = connect(&bulb)
+            .await
+            .bulb_type()
+            .await
+            .expect_err("nothing to go on");
+        assert!(matches!(err, Error::UnknownModel { .. }), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn a_colour_bulb_that_reports_no_kelvin_range_is_an_error() {
+    // A getModelConfig with no `cctRange` and no getUserConfig to fall back
+    // on. An RGB bulb whose usable range is unknown cannot be given a colour
+    // temperature safely, so this is refused rather than guessed.
+    let bulb = MockBulb::builder()
+        .personality(Personality::rgb_legacy().with_model_config(
+            r#"{"method":"getModelConfig","env":"pro","result":{"ps":1,"wcr":30,"nowc":1}}"#,
+        ))
+        .start()
+        .await;
+    let client = connect(&bulb).await;
+
+    assert_eq!(client.kelvin_range().await.expect("no range"), None);
+    let err = client.bulb_type().await.expect_err("no kelvin range");
+    assert!(
+        err.to_string().contains("must report a Kelvin range"),
+        "{err}"
     );
 }
 
