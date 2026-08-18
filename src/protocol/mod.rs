@@ -28,12 +28,16 @@
 //! parse failure, and a firmware update into a broken client.
 
 mod config;
+mod model;
 mod pilot;
 mod request;
 mod response;
 mod types;
 
 pub use config::{ModelConfig, Power, SystemConfig, UserConfig};
+pub use model::{
+    BulbClass, BulbData, BulbType, Derivation, Features, Heads, KelvinRange, ModuleName,
+};
 pub use pilot::{Pilot, PilotBuilder, PilotParams, Success};
 pub use request::Request;
 pub use response::{DeviceError, Response};

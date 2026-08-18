@@ -104,6 +104,46 @@ async fn out_of_range_temperature_and_scene_are_rejected() {
 }
 
 #[tokio::test]
+async fn a_temperature_outside_the_model_range_is_clamped_not_rejected() {
+    // Measured on ESP25_SHRGB_01 fw 1.38.0, which reports a cctRange of
+    // 2200-6500: everything the wire accepts is taken and clamped into that,
+    // in both directions, and read back clamped. Only 1000-12000 is the
+    // boundary between "clamped" and "refused".
+    let bulb = MockBulb::start().await;
+    let client = Client::new().await;
+
+    for (sent, reported) in [
+        (1000, 2200),
+        (2199, 2200),
+        (2200, 2200),
+        (4000, 4000),
+        (6500, 6500),
+        (6501, 6500),
+        (9000, 6500),
+        (12000, 6500),
+    ] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"temp": sent}}),
+            )
+            .await;
+        assert_eq!(reply["result"]["success"], true, "temp {sent}");
+        assert_eq!(bulb.pilot()["temp"], reported, "temp {sent}");
+    }
+
+    for refused in [999, 12001] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"temp": refused}}),
+            )
+            .await;
+        assert_eq!(reply["error"]["code"], -32602, "temp {refused}");
+    }
+}
+
+#[tokio::test]
 async fn rejects_unknown_methods_and_missing_params() {
     let bulb = MockBulb::start().await;
     let client = Client::new().await;

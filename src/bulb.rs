@@ -4,7 +4,8 @@ use std::net::{IpAddr, SocketAddr};
 
 use crate::error::{Error, Result};
 use crate::protocol::{
-    ModelConfig, Pilot, PilotBuilder, Power, Request, Response, Success, SystemConfig, UserConfig,
+    BulbData, BulbType, KelvinRange, ModelConfig, Pilot, PilotBuilder, Power, Request, Response,
+    Success, SystemConfig, UserConfig,
 };
 use crate::transport::{RetryPolicy, Transport};
 
@@ -224,26 +225,94 @@ impl Bulb {
     /// missing, falls back to `getUserConfig`'s `extRange` / `whiteRange`.
     /// Returns `None` only when neither source reports a range.
     ///
+    /// This is the range that means something. The wire accepts far more —
+    /// measured on `ESP25_SHRGB_01` fw 1.38.0, `temp: 12000` is taken and
+    /// clamped by a bulb that reports 2200–6500.
+    ///
     /// # Errors
     ///
     /// Propagates transport and parse failures. A missing method is not an
     /// error here — it is the reason to try the next source.
-    pub async fn kelvin_range(&self) -> Result<Option<(u16, u16)>> {
-        match self.get_model_config().await {
-            Ok(config) => {
-                if let Some(range) = config.kelvin_range() {
-                    return Ok(Some(range));
-                }
-            }
-            Err(Error::NotSupported { .. }) => {}
+    pub async fn kelvin_range(&self) -> Result<Option<KelvinRange>> {
+        Ok(self.capabilities().await?.kelvin_range)
+    }
+
+    /// What kind of device this is, and what it can be asked to do.
+    ///
+    /// Reads `getSystemConfig` for the `moduleName` the capabilities are
+    /// derived from, then whichever of `getModelConfig` and `getUserConfig`
+    /// the firmware answers for the ranges the name cannot carry.
+    ///
+    /// Nothing is cached: a caller that needs this more than once should hold
+    /// on to it, since it costs at least two round trips.
+    ///
+    /// ```no_run
+    /// # use std::net::{IpAddr, Ipv4Addr};
+    /// # use wizlight::Bulb;
+    /// # async fn example() -> Result<(), wizlight::Error> {
+    /// let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
+    /// let bulb_type = bulb.bulb_type().await?;
+    /// if bulb_type.features.color {
+    ///     println!("{} does colour", bulb_type.class);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::UnknownModel`] if the bulb cannot describe itself — see
+    /// [`BulbType::from_data`] — and otherwise whatever
+    /// [`request`](Bulb::request) returns.
+    pub async fn bulb_type(&self) -> Result<BulbType> {
+        let system = self.get_system_config().await?;
+        let capabilities = self.capabilities().await?;
+
+        BulbType::from_data(&BulbData {
+            module_name: system.module_name.as_deref(),
+            type_id: system.type_id,
+            fw_version: system.fw_version.as_deref(),
+            kelvin_range: capabilities.kelvin_range,
+            // `getModelConfig` wins where it exists; `drvConf` is what
+            // firmware before 1.22 offers instead.
+            white_channels: capabilities.white_channels.or(system.white_channels()),
+            white_to_color_ratio: capabilities
+                .white_to_color_ratio
+                .or(system.white_to_color_ratio()),
+            fan_speed_range: capabilities.fan_speed_range,
+        })
+    }
+
+    /// Reads whichever config method the firmware answers.
+    ///
+    /// One helper because the fallback is the same question every time: after
+    /// 1.22 the answers live in `getModelConfig`, before it in
+    /// `getUserConfig`, and a bulb may implement the newer method without the
+    /// range being in it. A method the firmware lacks is not an error here —
+    /// it is the reason to ask the next one.
+    async fn capabilities(&self) -> Result<Capabilities> {
+        let model = match self.get_model_config().await {
+            Ok(config) => Some(config),
+            Err(Error::NotSupported { .. }) => None,
             Err(err) => return Err(err),
+        };
+        let capabilities = Capabilities::from_model(model.as_ref());
+        if capabilities.kelvin_range.is_some() {
+            return Ok(capabilities);
         }
 
-        match self.get_user_config().await {
-            Ok(config) => Ok(config.kelvin_range()),
-            Err(Error::NotSupported { .. }) => Ok(None),
-            Err(err) => Err(err),
-        }
+        let user = match self.get_user_config().await {
+            Ok(config) => Some(config),
+            Err(Error::NotSupported { .. }) => None,
+            Err(err) => return Err(err),
+        };
+        Ok(Capabilities {
+            kelvin_range: user.as_ref().and_then(UserConfig::kelvin_range),
+            fan_speed_range: user
+                .and_then(|config| config.fan_speed)
+                .or(capabilities.fan_speed_range),
+            ..capabilities
+        })
     }
 
     /// Sends a request and waits for the bulb's answer.
@@ -295,6 +364,30 @@ impl Bulb {
         match self.request(&Request::new(method)).await {
             Ok(_) | Err(Error::Timeout { .. }) => Ok(()),
             Err(err) => Err(err),
+        }
+    }
+}
+
+/// The parts of a [`BulbType`] that only the config methods can answer, from
+/// whichever of them the firmware implements.
+#[derive(Clone, Copy, Debug, Default)]
+struct Capabilities {
+    kelvin_range: Option<KelvinRange>,
+    fan_speed_range: Option<u32>,
+    white_channels: Option<u32>,
+    white_to_color_ratio: Option<u32>,
+}
+
+impl Capabilities {
+    fn from_model(model: Option<&ModelConfig>) -> Self {
+        let Some(model) = model else {
+            return Self::default();
+        };
+        Self {
+            kelvin_range: model.kelvin_range(),
+            fan_speed_range: model.fan_speed,
+            white_channels: model.nowc,
+            white_to_color_ratio: model.wcr,
         }
     }
 }

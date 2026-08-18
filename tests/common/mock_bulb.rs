@@ -14,8 +14,14 @@
 //!   was off, and `setState` behaves exactly like `setPilot` in this. Setting
 //!   only `dimming` does not — an off bulb ignores it completely.
 //! - An out-of-range `dimming` is **silently clamped** and still reports
-//!   success, while an out-of-range `temp` or `sceneId` is rejected with
-//!   `-32602`. The bulb cannot be trusted to validate.
+//!   success, while a `temp` outside the wire's 1000–12000 or an out-of-range
+//!   `sceneId` is rejected with `-32602`. The bulb cannot be trusted to
+//!   validate.
+//! - A `temp` *inside* that wire range but outside the model's own `cctRange`
+//!   is accepted, **clamped into the reported range, and read back clamped**:
+//!   a bulb reporting 2200–6500 answers `success` to 12000 and then reports
+//!   6500. Acceptance is not the same as being honoured, which is why the
+//!   usable range comes from `getModelConfig`.
 //! - Colour, colour temperature and scene are mutually exclusive: setting one
 //!   clears the others.
 //! - A `syncPilot` push can be emitted *before* the reply to the request that
@@ -68,7 +74,8 @@ pub const BULB_PORT: u16 = 38899;
 /// not own.
 #[derive(Clone, Copy)]
 pub struct Personality {
-    /// `moduleName` as reported by `getSystemConfig`.
+    /// `moduleName` as reported by `getSystemConfig`, or empty on firmware too
+    /// old to report one.
     pub module_name: &'static str,
     /// Firmware version as reported by `getSystemConfig`.
     pub fw_version: &'static str,
@@ -148,6 +155,54 @@ impl Personality {
         }
     }
 
+    /// Replaces the `getSystemConfig` reply.
+    ///
+    /// For the answers no real model gives — a bulb that reports neither a
+    /// `moduleName` nor a `typeId`, or a module name with no identifier in it.
+    /// Both come from `pywizlight`'s synthetic fixtures rather than from any
+    /// device, so they are supplied at the call site instead of pretending to
+    /// be a model.
+    #[must_use]
+    pub fn with_system_config(mut self, system_config: &'static str) -> Self {
+        self.system_config = system_config;
+        self
+    }
+
+    /// Replaces the `getModelConfig` reply, for the same reason.
+    #[must_use]
+    pub fn with_model_config(mut self, model_config: &'static str) -> Self {
+        self.model_config = model_config;
+        self
+    }
+
+    /// `ESP03_FANDIMS_31` on 1.31.32 — a ceiling fan with a dimmable white
+    /// light, and the only personality whose `getModelConfig` reports a
+    /// `fanSpeed`.
+    pub fn fan() -> Self {
+        Self {
+            module_name: "ESP03_FANDIMS_31",
+            fw_version: "1.31.32",
+            system_config: r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"d8a0119906b7","homeId":5385975,"roomId":8016844,"rgn":"eu","moduleName":"ESP03_FANDIMS_31","fwVersion":"1.31.32","groupId":0,"ping":0}}"#,
+            model_config: r#"{"method":"getModelConfig","env":"pro","result":{"ps":1,"pwmFreq":200,"pwmRange":[0,100],"wcr":20,"nowc":1,"cctRange":[2700,2700,2700,2700],"renderFactor":[255,0,255,255,0,0,0,0,0,0],"fanSpeed":6,"wizc1":{"mode":[0,0,0,0,0,0,0]},"wizc2":{"mode":[0,0,0,0,0,0,0]}}}"#,
+            user_config: METHOD_NOT_FOUND,
+            power: None,
+        }
+    }
+
+    /// A dimmable white bulb on firmware 1.8.0, which is too old to report a
+    /// `moduleName` at all: the class has to come from its `typeId`, and the
+    /// white channel count from `drvConf`.
+    pub fn firmware_1_8_0() -> Self {
+        Self {
+            module_name: "",
+            fw_version: "1.8.0",
+            system_config: r#"{"method":"getSystemConfig","env":"pro","result":{"mac":"a8bb502054e3","homeId":5385975,"homeLock":false,"pairingLock":false,"typeId":0,"fwVersion":"1.8.0","groupId":0,"drvConf":[20,1]}}"#,
+            model_config: METHOD_NOT_FOUND,
+            user_config: r#"{"method":"getUserConfig","env":"pro","result":{"fadeIn":500,"fadeOut":500,"fadeNight":false,"dftDim":100,"pwmRange":[5,100],"whiteRange":[2700,2700]}}"#,
+            power: None,
+        }
+    }
+
     /// `ESP20_DHRGB_01` on 1.35.0 — dual head, so `devices` matters.
     pub fn dual_head() -> Self {
         Self {
@@ -222,11 +277,14 @@ impl MockBulbBuilder {
             })
         });
 
+        let model_config = config(self.personality.model_config, &self.mac);
+        let user_config = config(self.personality.user_config, &self.mac);
         let shared = Arc::new(Shared {
             mac: self.mac.clone(),
             system_config: config(self.personality.system_config, &self.mac),
-            model_config: config(self.personality.model_config, &self.mac),
-            user_config: config(self.personality.user_config, &self.mac),
+            kelvin_range: reported_kelvin_range(&model_config, &user_config),
+            model_config,
+            user_config,
             power: self.personality.power.map(|p| config(p, &self.mac)),
             state: Mutex::new(State {
                 pilot: pilot.as_object().expect("pilot is an object").clone(),
@@ -380,12 +438,33 @@ fn config(raw: &str, mac: &str) -> Value {
     value
 }
 
+/// The Kelvin range a personality reports, as `setPilot` needs it: the outer
+/// bounds of `cctRange`, or of the older `extRange` / `whiteRange`.
+fn reported_kelvin_range(model_config: &Value, user_config: &Value) -> Option<(i64, i64)> {
+    let bounds = |config: &Value, key: &str| -> Option<(i64, i64)> {
+        let values: Vec<i64> = config
+            .get("result")?
+            .get(key)?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_i64)
+            .collect();
+        Some((*values.iter().min()?, *values.iter().max()?))
+    };
+    bounds(model_config, "cctRange")
+        .or_else(|| bounds(user_config, "extRange"))
+        .or_else(|| bounds(user_config, "whiteRange"))
+}
+
 struct Shared {
     mac: String,
     system_config: Value,
     model_config: Value,
     user_config: Value,
     power: Option<Value>,
+    /// What `temp` is clamped into; `None` for a personality that reports no
+    /// range at all, which is then left to store whatever it was sent.
+    kelvin_range: Option<(i64, i64)>,
     state: Mutex<State>,
 }
 
@@ -527,22 +606,24 @@ impl Shared {
             // and the bulb does not reboot. `reset` is untested and assumed to
             // match. See the fidelity notes at the top of the module.
             "reboot" | "reset" => reply(latency, error(method, -32600, "Invalid Request")),
-            "setPilot" | "setState" => match apply(&mut state.pilot, request.get("params")) {
-                Err((code, message)) => reply(latency, error(method, code, &message)),
-                Ok(()) => {
-                    let ack = json!({
-                        "method": method,
-                        "env": "pro",
-                        "result": {"success": true},
-                    });
-                    Reaction {
-                        latency,
-                        reply: Some(ack.to_string().into_bytes()),
-                        push: self.push_from(&state, "udp"),
-                        push_first: state.push_first,
+            "setPilot" | "setState" => {
+                match apply(&mut state.pilot, request.get("params"), self.kelvin_range) {
+                    Err((code, message)) => reply(latency, error(method, code, &message)),
+                    Ok(()) => {
+                        let ack = json!({
+                            "method": method,
+                            "env": "pro",
+                            "result": {"success": true},
+                        });
+                        Reaction {
+                            latency,
+                            reply: Some(ack.to_string().into_bytes()),
+                            push: self.push_from(&state, "udp"),
+                            push_first: state.push_first,
+                        }
                     }
                 }
-            },
+            }
             other => reply(latency, error(other, -32601, "Method not found")),
         }
     }
@@ -575,7 +656,14 @@ impl Shared {
 
 /// Applies `setPilot` params to the current state, or explains why the bulb
 /// refused.
-fn apply(pilot: &mut Map<String, Value>, params: Option<&Value>) -> Result<(), (i64, String)> {
+///
+/// `kelvin_range` is the model's own reported range, which is what a `temp`
+/// gets clamped into — a different bound from the one the wire accepts.
+fn apply(
+    pilot: &mut Map<String, Value>,
+    params: Option<&Value>,
+    kelvin_range: Option<(i64, i64)>,
+) -> Result<(), (i64, String)> {
     let invalid = || (-32602, "Invalid params".to_owned());
     let params = params.and_then(Value::as_object).ok_or_else(invalid)?;
     // Measured: an absent `params` key and an empty one are not the same
@@ -602,9 +690,12 @@ fn apply(pilot: &mut Map<String, Value>, params: Option<&Value>) -> Result<(), (
             "dimming" => {
                 value.as_i64().ok_or_else(invalid)?;
             }
+            // Measured: the wire bound is 1000-12000, and 999 or 15000 are
+            // refused. Anything inside it is accepted whatever the model's own
+            // range says, and clamped into it below.
             "temp" => {
                 let v = value.as_i64().ok_or_else(invalid)?;
-                if !(1000..=10_000).contains(&v) {
+                if !(1000..=12_000).contains(&v) {
                     return Err(invalid());
                 }
             }
@@ -659,10 +750,16 @@ fn apply(pilot: &mut Map<String, Value>, params: Option<&Value>) -> Result<(), (
     }
 
     for (key, value) in params {
-        let value = if key == "dimming" {
-            json!(value.as_i64().unwrap_or(100).clamp(1, 100))
-        } else {
-            value.clone()
+        let value = match (key.as_str(), kelvin_range) {
+            ("dimming", _) => json!(value.as_i64().unwrap_or(100).clamp(1, 100)),
+            // Measured on ESP25_SHRGB_01 fw 1.38.0, whose reported cctRange is
+            // 2200-6500: `temp` is clamped into that range in both directions
+            // and reported back clamped — 1000 reads as 2200, 9000 and 12000
+            // read as 6500. So a `success` says nothing about the bulb having
+            // honoured the temperature, and the range worth knowing is the one
+            // getModelConfig reports rather than the one the wire takes.
+            ("temp", Some((min, max))) => json!(value.as_i64().unwrap_or(min).clamp(min, max)),
+            _ => value.clone(),
         };
         pilot.insert(key.clone(), value);
     }
