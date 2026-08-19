@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Scene` and `Adjustable`: the scene table — 37 light modes with names, ids,
+  per-class availability and, per scene, whether `speed` and `dimming` do
+  anything. `Scene::all` is a `const`, so a scene picker needs no bulb;
+  `Scene::for_class`, `BulbType::scenes` and `Bulb::scenes` narrow it to what a
+  given class, module or device can play.
+- `Scene::from_name` matches leniently — case, spaces and punctuation are all
+  ignored, so `Deep dive`, `deep-dive` and `DEEPDIVE` are one scene, and the
+  spellings used by `pywizlight`, openHAB and Adafruit all resolve.
+- `Pilot::scene` names the scene a bulb reports playing, where the table knows
+  the id.
 - Typed pilot surface: `PilotBuilder`, validated newtypes (`Channel`, `Dimming`,
   `Kelvin`, `Speed`, `Ratio`, `SceneId`, `Devices`), and `Pilot` /
   `Success` result types.
@@ -26,6 +36,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`SceneId::new` is fallible**, and checks the id against the scene table
+  rather than against a range. There is no useful range to check: measured on
+  `ESP25_SHRGB_01` fw 1.38.0, the bulb accepts every id in `1..=248` — the ~200
+  that name no scene included — and answers `success`, so a range check would
+  wave through ids that do nothing. `TryFrom<u16>` replaces `From<u16>`, and
+  `SceneId::scene` goes the other way without a `Result`, since an id that names
+  nothing cannot be a `SceneId`. Ids a bulb may *report* but not accept — `0`
+  for "no scene", `256..=265` for a custom mode made in the app — stay
+  expressible on the read side, where `Pilot::scene_id` is a plain `u16`.
+- **`speed` is refused where it can do nothing**: alongside `r`/`g`/`b`/`c`/`w`
+  or `temp`, which stop any scene, and alongside a scene the table calls static.
+  On its own it is still allowed, and retunes whatever scene is already running.
+  A scene no source documents is *not* treated as static.
 - CLI: results go to stdout and everything else to stderr, so redirecting
   stdout yields data or nothing at all. A failure used to print a payload to
   stdout *and* an `anyhow` line to stderr, which meant `--json` emitted valid
@@ -57,8 +80,9 @@ inherited from `pywizlight` turned out to be wrong.
   wire bound**: the bulb accepts every `u8` and silently clamps. The previous
   claim that `0` is "out of range on the wire" was wrong.
 - `SceneId` docs claimed custom slots at `256..=265` and Rhythm at `1000`. Both
-  are **refused** on this firmware; a write is accepted for `1..=248`.
-  Construction stays infallible — that bound is one firmware's.
+  are **refused** on this firmware; a write is accepted for `1..=248`, and that
+  accepted range is contiguous, so it is a range check rather than a table of
+  valid scenes.
 - `Speed` `10..=200`, `Ratio` `0..=100` and `Devices` `1..=3` were all correct,
   and are no longer marked unverified. `3` working on a single-head bulb where
   `2` does not is the evidence for `3` meaning "every head".
@@ -78,8 +102,8 @@ inherited from `pywizlight` turned out to be wrong.
 - Only requests carry the validated newtypes. Results carry plain integers,
   because a bulb may report a value it would refuse to be sent — `dimming: 0`
   on an off bulb — and a validating parse would turn that into an error.
-- `Channel` and `SceneId` construction is infallible, so it does not return a
-  `Result` that can never be `Err`.
+- `Channel` construction is infallible, so it does not return a `Result` that can
+  never be `Err`. `SceneId` was too, and is not any more: see above.
 - `reboot` **does not work on the measured hardware**: it is refused with
   `-32600 Invalid Request` in every spelling of `params`, and the bulb keeps
   running. Not `-32601`, so the firmware knows the method and declines it. The
@@ -94,10 +118,33 @@ inherited from `pywizlight` turned out to be wrong.
   acknowledges with `success: false`, rather than handing back an ack that is
   easy to ignore.
 
+### Where the scene table comes from
+
+None of it is measured, and **acceptance cannot measure it**: the bulb takes any
+id in `1..=248`, so a `success` is no evidence that a scene exists.
+
+- Ids `1..=33` — names, per-class availability, and whether `speed` and
+  `dimming` apply — are WiZ's own [light-mode table][light-modes], published with
+  the Pro API. It is the only source that states the last two.
+- Ids `34..=36` and `40` are `pywizlight`'s. Nothing found says whether they
+  animate, so `Scene::adjustable` reports `None` for them rather than a guess.
+  `37`, `38` and `39` name nothing anywhere.
+- Where the sources disagree, the vendor's wins and the disagreement is
+  documented on the module. Its tunable-white column matches `pywizlight`
+  exactly; its dimmable-white column adds three ids `pywizlight` leaves out, and
+  contradicts the vendor's own prose in the same document. Adafruit's library
+  disagrees about three more on whether they animate.
+- `1000` (Rhythm) and `256..=265` (the app's custom modes) are **not** in the
+  table, because a write of either is refused on the measured firmware.
+  `pywizlight`'s mapping for the slots comes from hardware *reporting* them, not
+  accepting them, so `Scene::from_id` answers `None` and nothing pretends they
+  can be set.
+
+Settling any of this needs someone looking at a bulb of each class, which is a
+hardware pass rather than a test.
+
 ### Known gaps
 
-- No bulb model / capability parsing beyond the raw config structs, and no scene
-  tables yet.
 - No RGB ↔ RGB+CW conversion.
 - No streaming path and no `syncPilot` push listener.
 - `getPilot` per-head reads are not implemented. `devices` uses a one-based
@@ -135,5 +182,6 @@ is only reachable by asking for `0.1.0-alpha.1` exactly.
 - The `wizlight` binary installs and runs, but has no commands and exits with an
   error explaining that.
 
+[light-modes]: https://docs.pro.wizconnected.com/#light-modes
 [Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.1...HEAD
 [0.1.0-alpha.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.1

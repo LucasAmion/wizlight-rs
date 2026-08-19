@@ -75,6 +75,18 @@ pub enum Error {
         message: String,
     },
 
+    /// No scene has that id or that name.
+    ///
+    /// The scene table is what this is checked against, not the range the bulb
+    /// accepts: measured on `ESP25_SHRGB_01` fw 1.38.0, a write is taken for
+    /// every `sceneId` in `1..=248`, most of which name nothing. See
+    /// [`Scene`](crate::protocol::Scene).
+    #[error("unknown scene: {message}")]
+    UnknownScene {
+        /// The id or name that matched nothing.
+        message: String,
+    },
+
     /// A parameter was out of range or otherwise unacceptable.
     ///
     /// Returned for the bulb's `-32602 Invalid params` and by client-side

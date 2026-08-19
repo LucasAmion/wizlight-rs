@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::scene::Scene;
 use super::types::{Channel, Devices, Dimming, Kelvin, Ratio, SceneId, Speed};
 use crate::error::{Error, Result};
 use crate::protocol::Request;
@@ -89,8 +90,9 @@ impl ColourMode {
 /// # Ok::<(), wizlight::Error>(())
 /// ```
 ///
-/// Fields that do not carry colour — `state`, `dimming`, `speed`, `ratio`,
-/// `devices` — compose with any of the three:
+/// Fields that do not carry colour — `state`, `dimming`, `ratio`, `devices` —
+/// compose with any of the three. `speed` is the exception, because it belongs
+/// to a scene: see [`PilotBuilder::speed`].
 ///
 /// ```
 /// use wizlight::protocol::{Channel, Dimming, PilotBuilder};
@@ -145,6 +147,17 @@ impl PilotBuilder {
     }
 
     /// Sets scene animation `speed` (10–200).
+    ///
+    /// `speed` only means something to a scene that animates, so it may
+    /// accompany [`scene`](PilotBuilder::scene) — or go on its own, which
+    /// retunes whatever scene the bulb is already running. Sending it alongside
+    /// a colour, a temperature, or a scene the table calls static is an error
+    /// from [`params`](PilotBuilder::params): the bulb takes it and nothing
+    /// happens.
+    ///
+    /// A scene no source documents is not treated as static, so `speed` is
+    /// allowed through for it. And if the table turns out to be wrong about
+    /// one, the way round is to send the scene and the speed as two requests.
     #[must_use]
     pub fn speed(mut self, speed: Speed) -> Self {
         self.speed = Some(speed);
@@ -288,6 +301,8 @@ impl PilotBuilder {
             });
         }
 
+        self.check_speed()?;
+
         let mut params = PilotParams {
             state: self.state,
             dimming: self.dimming,
@@ -311,6 +326,39 @@ impl PilotBuilder {
         }
 
         Ok(params)
+    }
+
+    /// Refuses a `speed` that cannot do anything.
+    ///
+    /// `speed` is the animation rate of a running scene, and this request either
+    /// starts an animating scene, leaves whatever is running alone, or replaces
+    /// it with something that does not animate. Only the last two cases can be
+    /// judged here, and the third is the one worth refusing: the bulb accepts
+    /// the parameter either way and reports success, so a caller that pairs
+    /// `speed` with a colour has no way of finding out it did nothing.
+    fn check_speed(&self) -> Result<()> {
+        if self.speed.is_none() {
+            return Ok(());
+        }
+        let refuse = |reason: String| {
+            Err(Error::InvalidParam {
+                message: format!("`speed` sets the rate of an animating scene, but {reason}"),
+            })
+        };
+        match self.colour {
+            Some(ColourMode::Channels { .. }) => {
+                refuse("this request sets `r`/`g`/`b`/`c`/`w`, which stops any scene".to_owned())
+            }
+            Some(ColourMode::Temp(_)) => {
+                refuse("this request sets `temp`, which stops any scene".to_owned())
+            }
+            Some(ColourMode::Scene(scene)) if !scene.scene().takes_speed() => {
+                refuse(format!("`{}` does not animate", scene.scene().name()))
+            }
+            // No colour mode: the scene already running keeps playing, and this
+            // is the request that changes its rate.
+            _ => Ok(()),
+        }
     }
 
     /// The channel mode to write into, or `None` if a different colour mode is
@@ -463,6 +511,18 @@ pub struct Pilot {
 }
 
 impl Pilot {
+    /// The scene the bulb is playing, when the reported id names one.
+    ///
+    /// `None` covers three different situations, which is why the raw
+    /// [`scene_id`](Pilot::scene_id) is still there: no scene is running (the
+    /// bulb reports `0` while colour or temperature is active), the field was
+    /// absent, or the id is one the table cannot name — a `256..=265` custom
+    /// mode made in the app, or a scene a newer firmware added.
+    #[must_use]
+    pub fn scene(&self) -> Option<Scene> {
+        Scene::from_id(self.scene_id?)
+    }
+
     /// RGB triple when all three channels are present.
     #[must_use]
     pub fn rgb(&self) -> Option<(u8, u8, u8)> {
@@ -515,8 +575,8 @@ mod tests {
                 .temp(Kelvin::new(4000).unwrap()),
             PilotBuilder::new()
                 .temp(Kelvin::new(4000).unwrap())
-                .scene(SceneId::new(4)),
-            PilotBuilder::new().scene(SceneId::new(4)).rgb(
+                .scene(SceneId::new(4).unwrap()),
+            PilotBuilder::new().scene(SceneId::new(4).unwrap()).rgb(
                 Channel::new(1),
                 Channel::new(2),
                 Channel::new(3),
@@ -541,7 +601,7 @@ mod tests {
     fn the_conflict_message_names_both_modes() {
         let err = PilotBuilder::new()
             .temp(Kelvin::new(2700).unwrap())
-            .scene(SceneId::new(4))
+            .scene(SceneId::new(4).unwrap())
             .set_pilot()
             .unwrap_err();
         let message = err.to_string();
@@ -567,9 +627,9 @@ mod tests {
     }
 
     #[test]
-    fn non_colour_fields_compose_with_every_mode() {
+    fn non_colour_fields_compose_with_a_scene() {
         let params = PilotBuilder::new()
-            .scene(SceneId::new(4))
+            .scene(SceneId::new(4).unwrap())
             .speed(Speed::new(100).unwrap())
             .dimming(Dimming::new(40).unwrap())
             .state(true)
@@ -579,6 +639,83 @@ mod tests {
         assert_eq!(params.speed.unwrap().get(), 100);
         assert_eq!(params.dimming.unwrap().get(), 40);
         assert_eq!(params.state, Some(true));
+    }
+
+    /// `speed` is the one non-colour field that does not compose with
+    /// everything, because it is a property of a running scene.
+    #[test]
+    fn speed_is_allowed_where_it_can_do_something() {
+        let speed = Speed::new(100).unwrap();
+
+        // Party animates.
+        let params = PilotBuilder::new()
+            .scene(SceneId::new(4).unwrap())
+            .speed(speed)
+            .params()
+            .unwrap();
+        assert_eq!(params.speed.unwrap().get(), 100);
+
+        // Snowy sky is in no source that says either way, so it is not treated
+        // as static: refusing on the strength of a missing row would hide a
+        // control that probably works.
+        assert!(
+            PilotBuilder::new()
+                .scene(SceneId::new(36).unwrap())
+                .speed(speed)
+                .params()
+                .is_ok()
+        );
+
+        // On its own it retunes whatever scene the bulb is already running.
+        let params = PilotBuilder::new().speed(speed).params().unwrap();
+        assert_eq!(params.speed.unwrap().get(), 100);
+        assert!(params.scene_id.is_none());
+    }
+
+    #[test]
+    fn speed_is_refused_where_it_cannot() {
+        let speed = Speed::new(100).unwrap();
+        let cases = [
+            // Warm white holds still, so the rate of nothing is nothing.
+            (
+                PilotBuilder::new()
+                    .scene(SceneId::new(11).unwrap())
+                    .speed(speed),
+                "Warm white",
+            ),
+            (
+                PilotBuilder::new()
+                    .rgb(Channel::new(1), Channel::new(2), Channel::new(3))
+                    .speed(speed),
+                "r`/`g`/`b",
+            ),
+            (
+                PilotBuilder::new()
+                    .temp(Kelvin::new(2700).unwrap())
+                    .speed(speed),
+                "temp",
+            ),
+        ];
+
+        for (builder, expected) in cases {
+            let err = builder.set_pilot().unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains("`speed`"), "{message}");
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_reported_scene_id_is_named_only_when_the_table_knows_it() {
+        let named: Pilot = serde_json::from_str(r#"{"sceneId":23,"speed":100}"#).unwrap();
+        assert_eq!(named.scene().map(Scene::name), Some("Deep dive"));
+
+        // `0` is the bulb saying no scene is running, and 256 is a custom mode
+        // made in the app. Neither is a scene this crate can name.
+        for raw in [r#"{"sceneId":0}"#, r#"{"sceneId":256}"#, "{}"] {
+            let pilot: Pilot = serde_json::from_str(raw).unwrap();
+            assert_eq!(pilot.scene(), None, "{raw}");
+        }
     }
 
     #[test]
@@ -672,7 +809,7 @@ mod tests {
             ),
             (
                 PilotBuilder::new()
-                    .scene(SceneId::new(4))
+                    .scene(SceneId::new(4).unwrap())
                     .speed(Speed::new(100).unwrap())
                     .set_pilot()
                     .unwrap(),

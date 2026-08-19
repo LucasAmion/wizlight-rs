@@ -103,6 +103,40 @@ async fn out_of_range_temperature_and_scene_are_rejected() {
     assert_eq!(bulb.pilot()["temp"], 2700);
 }
 
+/// The harness has to be as unhelpful as the hardware here: a `sceneId` that
+/// names no scene is **accepted**, so nothing may treat a `success` as evidence
+/// that a scene exists. The ids `pywizlight` documents as Rhythm and the custom
+/// slots are the ones actually refused.
+#[tokio::test]
+async fn a_scene_id_that_names_nothing_is_still_accepted() {
+    let bulb = MockBulb::start().await;
+    let client = Client::new().await;
+
+    for scene in [1, 100, 248] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"sceneId": scene}}),
+            )
+            .await;
+        assert_eq!(reply["result"]["success"], true, "{scene}");
+        assert_eq!(bulb.pilot()["sceneId"], scene);
+    }
+
+    // 0 is read-only, 249 is past the end, and 256 and 1000 are the two ranges
+    // inherited from `pywizlight` that this firmware does not have.
+    for scene in [0, 249, 256, 265, 1000] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"sceneId": scene}}),
+            )
+            .await;
+        assert_eq!(reply["error"]["code"], -32602, "{scene}");
+    }
+    assert_eq!(bulb.pilot()["sceneId"], 248, "a refusal changes nothing");
+}
+
 #[tokio::test]
 async fn a_temperature_outside_the_model_range_is_clamped_not_rejected() {
     // Measured on ESP25_SHRGB_01 fw 1.38.0, which reports a cctRange of

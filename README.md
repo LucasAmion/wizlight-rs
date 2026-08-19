@@ -27,7 +27,7 @@ real-time control, and it is the protocol layer underneath
   broadcast address from the local interfaces
 - ~~`getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
   requests and responses~~ — done
-- Bulb model parsing: capabilities, scene support and Kelvin range
+- ~~Bulb model parsing: capabilities, scene support and Kelvin range~~ — done
 - RGB ↔ RGB+CW conversion, cross-checked against `pywizlight`
 - A rate-limited streaming path for driving bulbs from live audio or video
 - `syncPilot` push updates
@@ -70,9 +70,10 @@ async fn main() -> Result<(), wizlight::Error> {
 ```
 
 Every channel value is a valid one, so `Channel::new` cannot fail. The types
-that *do* have a range — `Dimming`, `Kelvin`, `Speed`, `Ratio`, `Devices` —
-return a `Result`, because the bulb is not a reliable validator: it silently
-clamps an out-of-range `dimming` and reports success.
+that *do* have a range — `Dimming`, `Kelvin`, `Speed`, `Ratio`, `Devices`, and
+`SceneId` against the scene table — return a `Result`, because the bulb is not a
+reliable validator: it silently clamps an out-of-range `dimming` and reports
+success.
 
 Colour, colour temperature and scene are mutually exclusive in one request, and
 asking for two of them fails at build time rather than silently picking one:
@@ -86,6 +87,31 @@ let clash = PilotBuilder::new()
     .set_pilot();
 assert!(clash.is_err());
 ```
+
+Scenes — WiZ calls them light modes — are effects the bulb animates by itself,
+and the table of them is a `const`, so a scene picker needs no bulb and nothing
+to await:
+
+```rust
+use wizlight::protocol::{BulbClass, Scene};
+
+// Names are matched ignoring case and punctuation, so the spellings used by
+// pywizlight, openHAB and WiZ's own docs all resolve.
+let scene = Scene::from_name("deep-dive").expect("Deep dive is a scene");
+assert_eq!(scene.id().get(), 23);
+assert_eq!(scene.name(), "Deep dive");
+
+// 37 scenes for a colour bulb, 17 for tunable white, 11 for dimmable white.
+assert_eq!(Scene::for_class(BulbClass::Tw).count(), 17);
+
+// `speed` only means something to a scene that animates, and the builder
+// refuses it where it would do nothing.
+assert!(scene.takes_speed());
+```
+
+A `SceneId` has to name a scene in that table. The bulb is no help here —
+measured on `ESP25_SHRGB_01` fw 1.38.0, it accepts every id in `1..=248`,
+including the ~200 that name nothing at all, and answers `success`.
 
 Bulbs are found by broadcasting, and reported as they answer rather than in a
 batch at the end — a discovery run keeps re-broadcasting, so a bulb switched on

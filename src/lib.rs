@@ -17,8 +17,9 @@ pub use discovery::{
 };
 pub use error::{Error, Result};
 pub use protocol::{
-    BulbClass, BulbData, BulbType, Channel, Derivation, DeviceError, Devices, Dimming, Features,
-    Heads, Kelvin, KelvinRange, ModelConfig, ModuleName, Pilot, PilotBuilder, PilotParams, Power,
-    Ratio, Request, Response, SceneId, Speed, Success, SystemConfig, UserConfig,
+    Adjustable, BulbClass, BulbData, BulbType, Channel, Derivation, DeviceError, Devices, Dimming,
+    Features, Heads, Kelvin, KelvinRange, ModelConfig, ModuleName, Pilot, PilotBuilder,
+    PilotParams, Power, Ratio, Request, Response, Scene, SceneId, Speed, Success, SystemConfig,
+    UserConfig,
 };
 pub use transport::RetryPolicy;

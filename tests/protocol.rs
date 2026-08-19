@@ -8,7 +8,7 @@ use common::mock_bulb::{MockBulb, Personality};
 use serde_json::{Value, json};
 use wizlight::protocol::{
     BulbClass, Channel, Derivation, Devices, Dimming, Kelvin, KelvinRange, PilotBuilder, Ratio,
-    SceneId, Speed,
+    Scene, SceneId, Speed,
 };
 use wizlight::{Bulb, Error, RetryPolicy};
 
@@ -111,7 +111,7 @@ async fn scene_and_speed_round_trip() {
     let client = connect(&bulb).await;
 
     let builder = PilotBuilder::new()
-        .scene(SceneId::new(4))
+        .scene(SceneId::new(4).unwrap())
         .speed(Speed::new(100).unwrap());
     client.set_pilot(&builder).await.expect("set_pilot");
 
@@ -444,6 +444,52 @@ async fn a_colour_bulb_that_reports_no_kelvin_range_is_an_error() {
         err.to_string().contains("must report a Kelvin range"),
         "{err}"
     );
+}
+
+/// The scene list a bulb offers follows its class, which is the whole reason
+/// the table is keyed on class rather than on model.
+#[tokio::test]
+async fn the_scene_list_follows_the_bulb_s_class() {
+    let cases = [
+        (Personality::rgb(), 37),
+        (Personality::tunable_white(), 17),
+        (Personality::dimmable_white(), 11),
+        // Nothing to run a light mode on.
+        (Personality::socket(), 0),
+        (Personality::fan(), 0),
+    ];
+
+    for (personality, expected) in cases {
+        let name = personality.module_name;
+        let bulb = MockBulb::builder().personality(personality).start().await;
+        let scenes = connect(&bulb).await.scenes().await.expect("scenes");
+        assert_eq!(scenes.len(), expected, "{name}");
+        // Whatever the class, a listed scene has to be one the bulb can play.
+        assert!(scenes.iter().all(|scene| scene.name().len() > 1), "{name}");
+    }
+}
+
+/// Every scene is addressable end to end: it goes out as its id, and the bulb
+/// reports the same id back for the crate to name again.
+#[tokio::test]
+async fn every_scene_round_trips_through_a_bulb() {
+    let bulb = MockBulb::start().await;
+    let client = connect(&bulb).await;
+
+    for scene in Scene::all() {
+        client
+            .set_pilot(&PilotBuilder::new().scene(scene.id()))
+            .await
+            .unwrap_or_else(|err| panic!("{scene} was refused: {err}"));
+        assert_eq!(
+            last_request(&bulb),
+            json!({"method": "setPilot", "params": {"sceneId": scene.id().get()}}),
+        );
+
+        let pilot = client.get_pilot().await.expect("get_pilot");
+        assert_eq!(pilot.scene_id, Some(scene.id().get()));
+        assert_eq!(pilot.scene(), Some(*scene));
+    }
 }
 
 #[tokio::test]

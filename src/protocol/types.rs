@@ -2,7 +2,10 @@
 //!
 //! The bulb is not a reliable validator: an out-of-range `dimming` is silently
 //! clamped and still reports success, while an out-of-range `temp` errors.
-//! Ranges are therefore enforced here, before anything is serialised.
+//! Ranges are therefore enforced here, before anything is serialised. One of
+//! these is not a range at all — a [`SceneId`] is checked against the scene
+//! table, because the ids the bulb accepts are a superset of the scenes it can
+//! play.
 //!
 //! These are **write-side** types. Nothing here implements `Deserialize`, and
 //! that is deliberate: a bulb is free to *report* a value these constructors
@@ -12,6 +15,7 @@
 
 use serde::Serialize;
 
+use super::scene::Scene;
 use crate::error::{Error, Result};
 
 /// Defines a newtype whose range is checked on construction.
@@ -110,23 +114,80 @@ open_newtype! {
     Channel(u8)
 }
 
-open_newtype! {
-    /// A WiZ scene identifier.
+/// A WiZ scene identifier: an id that names a scene in [`Scene`]'s table.
+///
+/// Construction goes through the table rather than through a range, because a
+/// range is not the question. Measured on `ESP25_SHRGB_01` fw 1.38.0: a write
+/// is accepted for the whole of `1..=248` and refused with `-32602` outside it,
+/// and the accepted set includes the ~200 ids that name no scene at all. So the
+/// bulb's own bound proves nothing, and `SceneId::new(100)` failing is the
+/// point — the alternative is a `success` for a scene that does not exist.
+///
+/// ```
+/// use wizlight::protocol::SceneId;
+///
+/// assert_eq!(SceneId::new(4)?.scene().name(), "Party");
+/// // Inside the range the bulb accepts, but no scene has this id.
+/// assert!(SceneId::new(100).is_err());
+/// # Ok::<(), wizlight::Error>(())
+/// ```
+///
+/// This is the **write** side. A bulb reports ids this type cannot hold — `0`
+/// for "no scene, colour is active", and `256..=265` for a custom mode made in
+/// the app — so [`Pilot::scene_id`](super::Pilot) is a plain `u16` and
+/// [`Scene::from_id`] is how it gets a name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct SceneId(u16);
+
+impl SceneId {
+    /// Builds a `sceneId`.
     ///
-    /// Measured on `ESP25_SHRGB_01` fw 1.38.0: a write is accepted for
-    /// `1..=248` and refused with `-32602` outside it. That is a range check
-    /// and not a scene table — the bulb takes ids far beyond the scenes it can
-    /// actually play — so which ids do something useful is a per-model
-    /// question, and one this type does not try to answer.
+    /// # Errors
     ///
-    /// `0` is refused on a write but *is* reported on a read, where it means
-    /// "no scene, colour is active"; see [`Pilot::scene_id`](super::Pilot).
+    /// Returns [`Error::UnknownScene`] if no scene in the table has this id.
+    pub fn new(value: u16) -> Result<Self> {
+        Scene::from_id(value)
+            .map(Scene::id)
+            .ok_or_else(|| Error::UnknownScene {
+                message: format!(
+                    "no scene has id {value}; ids run 1..=36 and 40, and the bulb accepts \
+                     far more than it can play"
+                ),
+            })
+    }
+
+    /// Builds one from an id already known to be in the table.
+    pub(super) const fn new_unchecked(value: u16) -> Self {
+        Self(value)
+    }
+
+    /// The raw value.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+
+    /// The scene it names.
     ///
-    /// Construction stays infallible despite the measured bound. Scene
-    /// availability varies by firmware and model, and pinning the type to one
-    /// bulb's range would refuse ids that another may accept. The bulb is the
-    /// authority until there is a scene table to consult.
-    SceneId(u16)
+    /// Infallible: an id that does not name a scene cannot be a `SceneId`.
+    #[must_use]
+    pub fn scene(self) -> Scene {
+        Scene::from_id(self.0).expect("a SceneId is only built from the scene table")
+    }
+}
+
+impl TryFrom<u16> for SceneId {
+    type Error = Error;
+
+    fn try_from(value: u16) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<SceneId> for u16 {
+    fn from(value: SceneId) -> Self {
+        value.0
+    }
 }
 
 bounded_newtype! {
@@ -149,7 +210,12 @@ bounded_newtype! {
     ///
     /// Measured on `ESP25_SHRGB_01` fw 1.38.0: `9` and `201` are refused with
     /// `-32602`, `10` and `200` are accepted. Unlike `dimming`, the bulb
-    /// enforces this one itself.
+    /// enforces this one itself. WiZ's own Pro API documents the range as
+    /// 20–200; the hardware takes `10`, so the measurement wins.
+    ///
+    /// It only means something while a scene that animates is running — see
+    /// [`Scene::takes_speed`] and
+    /// [`PilotBuilder::speed`](super::PilotBuilder::speed).
     Speed(u8), "speed", 10..=200
 }
 
@@ -236,14 +302,26 @@ mod tests {
     }
 
     #[test]
-    fn open_newtypes_accept_their_whole_range() {
+    fn every_channel_value_is_a_valid_one() {
         assert_eq!(Channel::new(0).get(), 0);
         assert_eq!(Channel::new(255).get(), 255);
         assert_eq!(Channel::from(12u8).get(), 12);
-        // Infallible on purpose: the measured 1..=248 write range is one
-        // firmware's, and the bulb is left to refuse what it does not know.
-        assert_eq!(SceneId::new(4).get(), 4);
-        assert_eq!(u16::from(SceneId::new(1000)), 1000);
+    }
+
+    /// A `sceneId` is checked against the scene table rather than against the
+    /// range the bulb accepts, which is far wider than the scenes it can play.
+    #[test]
+    fn a_scene_id_has_to_name_a_scene() {
+        assert_eq!(SceneId::new(4).unwrap().get(), 4);
+        assert_eq!(u16::from(SceneId::try_from(40).unwrap()), 40);
+        assert_eq!(SceneId::new(23).unwrap().scene().name(), "Deep dive");
+
+        // Accepted by the measured hardware, and still not a scene.
+        for id in [0, 37, 100, 248, 256, 1000] {
+            assert!(SceneId::new(id).is_err(), "{id}");
+        }
+        let message = SceneId::new(100).unwrap_err().to_string();
+        assert!(message.contains("no scene has id 100"), "{message}");
     }
 
     #[test]

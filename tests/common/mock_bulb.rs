@@ -14,9 +14,13 @@
 //!   was off, and `setState` behaves exactly like `setPilot` in this. Setting
 //!   only `dimming` does not — an off bulb ignores it completely.
 //! - An out-of-range `dimming` is **silently clamped** and still reports
-//!   success, while a `temp` outside the wire's 1000–12000 or an out-of-range
-//!   `sceneId` is rejected with `-32602`. The bulb cannot be trusted to
-//!   validate.
+//!   success, while a `temp` outside the wire's 1000–12000, a `speed` outside
+//!   10–200, or a `sceneId` outside 1–248 is rejected with `-32602`. The bulb
+//!   cannot be trusted to validate.
+//! - The accepted `sceneId` range is **wider than the scenes that exist**: all
+//!   of 1–248 is taken, including the ~200 ids naming nothing, so a `success`
+//!   is no evidence a scene ran. `1000` (Rhythm) and the `256..=265` custom
+//!   slots are refused, which is the opposite of what `pywizlight` documents.
 //! - A `temp` *inside* that wire range but outside the model's own `cctRange`
 //!   is accepted, **clamped into the reported range, and read back clamped**:
 //!   a bulb reporting 2200–6500 answers `success` to 12000 and then reports
@@ -33,10 +37,10 @@
 //! - `getPower` is **not socket-only**: the RGB personality answers it, always
 //!   with `0`, whatever the bulb is doing.
 //!
-//! Anything else — `speed`/`ratio` handling, the lower `dimming` bound, and the
-//! config responses of the five models we do not own — is taken from
-//! `pywizlight` or from the documented parameter ranges and has **not** been
-//! confirmed against hardware.
+//! Anything else — `ratio` handling, the lower `dimming` bound, and the config
+//! responses of the five models we do not own — is taken from `pywizlight` or
+//! from the documented parameter ranges and has **not** been confirmed against
+//! hardware.
 //!
 //! `reboot` used to be the sharpest case of that: this harness answered it with
 //! an invented `{"success": true}`. It has since been measured, and the truth is
@@ -699,9 +703,25 @@ fn apply(
                     return Err(invalid());
                 }
             }
+            // Measured: a contiguous 1-248, scanned end to end. Note what that
+            // is *not* — most of those ids name no scene, and the bulb takes
+            // them anyway, so this is a range check and not a scene table. `0`
+            // is refused on a write while being reported on a read, and both
+            // `1000` (Rhythm) and the `256..=265` custom slots are refused,
+            // which is where the ranges inherited from `pywizlight` were wrong.
             "sceneId" => {
                 let v = value.as_i64().ok_or_else(invalid)?;
-                if !(0..=32).contains(&v) && v != 1000 {
+                if !(1..=248).contains(&v) {
+                    return Err(invalid());
+                }
+            }
+            // Measured: 9 and 201 are refused, 10 and 200 accepted. Unlike
+            // `dimming`, the bulb enforces this one. Whether it also refuses a
+            // `speed` with no animating scene behind it was not tested, so
+            // nothing here pretends to know.
+            "speed" => {
+                let v = value.as_i64().ok_or_else(invalid)?;
+                if !(10..=200).contains(&v) {
                     return Err(invalid());
                 }
             }
