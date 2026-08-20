@@ -451,7 +451,7 @@ async fn a_colour_bulb_that_reports_no_kelvin_range_is_an_error() {
 #[tokio::test]
 async fn the_scene_list_follows_the_bulb_s_class() {
     let cases = [
-        (Personality::rgb(), BulbClass::Rgb, 40),
+        (Personality::rgb(), BulbClass::Rgb, 39),
         (Personality::tunable_white(), BulbClass::Tw, 17),
         (Personality::dimmable_white(), BulbClass::Dw, 11),
         // Nothing to run a light mode on.

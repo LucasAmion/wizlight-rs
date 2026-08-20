@@ -517,11 +517,18 @@ pub struct Pilot {
 impl Pilot {
     /// The scene the bulb is playing, when the reported id names one.
     ///
-    /// `None` covers three different situations, which is why the raw
+    /// `None` covers several situations, which is why the raw
     /// [`scene_id`](Pilot::scene_id) is still there: no scene is running (the
     /// bulb reports `0` while colour or temperature is active), the field was
-    /// absent, or the id is one the table cannot name — a `256..=265` custom
+    /// absent, or the id is one the table does not carry — a `256..=265` custom
     /// mode made in the app, or a scene a newer firmware added.
+    ///
+    /// **A reported `41` is worth recognising.** It is a real scene, a ~6200 K
+    /// white at about a third of normal brightness, and every id from `42` to
+    /// `248` is clamped onto it — so a bulb driven by some other client with an
+    /// out-of-range id ends up sitting there. This crate refuses to *send* it,
+    /// for the reasons on [`SceneId::new`](super::SceneId::new), and so does not
+    /// name it either.
     #[must_use]
     pub fn scene(&self) -> Option<Scene> {
         Scene::from_id(self.scene_id?)

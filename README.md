@@ -101,7 +101,7 @@ let scene = Scene::from_name("deep-dive").expect("Deep dive is a scene");
 assert_eq!(scene.id().get(), 23);
 assert_eq!(scene.name(), "Deep dive");
 
-// 40 scenes for a colour bulb, 17 for tunable white, 11 for dimmable white.
+// 39 scenes for a colour bulb, 17 for tunable white, 11 for dimmable white.
 assert_eq!(Scene::for_class(BulbClass::Tw).count(), 17);
 
 // Animating and taking a `speed` are different questions: Wake up ramps over

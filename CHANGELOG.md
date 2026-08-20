@@ -150,12 +150,20 @@ flags only Night light as undimmable, where **Wake up** and **Alarm** ignore
 - **The scene space is `1..=41`, not `1..=248`.** Ids `42..=248` are accepted
   and clamped to `41`. An earlier pass here recorded only accept/refuse, never
   read the state back, and so concluded the bulb takes ~200 ids that name
-  nothing. It does not.
-- **`38`, `39` and `41` are real scenes no source lists** — static whites at
-  3500 K, 5000 K and one that reports no `temp` at all. They are named here and
-  nowhere else: **Soft white**, **Crisp white** and **Unknown white**,
+  nothing. It does not. Of those, `1..=36` and `38..=40` are worth sending;
+  `37` and `41` are not, for different reasons.
+- **`38` and `39` are real scenes no source lists** — static whites at 3500 K
+  and 5000 K, named here and nowhere else: **Soft white** and **Crisp white**,
   descriptions of where each was measured to sit rather than names WiZ uses.
-  The last is a placeholder until it can be compared against the others.
+  Both reach full brightness, checked against their own colour temperatures.
+- **`41` is a scene the crate refuses to send.** It plays a white of roughly
+  6200 K — placed by comparison against a reference bulb — but at `dimming: 100`
+  it emits about a *third* of what every other white does. It obeys `dimming`
+  below that ceiling, so the parameter is not ignored; the scale is a different
+  one, and a caller asking for full brightness quietly gets a third of it, with
+  no way to recover the rest. `SceneId::new(41)` fails and points at
+  `temp: 6200`. It is still explained on the read side, because `42..=248` are
+  all clamped onto it.
 - **`37` is not a scene.** It is accepted and sets a 2200 K colour temperature,
   reporting `sceneId: 0`.
 - **The user slots work.** An earlier measurement found `256` refused and

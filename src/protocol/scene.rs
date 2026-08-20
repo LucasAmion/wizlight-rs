@@ -40,14 +40,20 @@
 //!
 //! # What the sources got wrong
 //!
-//! - Ids **`38`, `39` and `41`** are real scenes that nothing in the ecosystem
-//!   lists — static whites at 3500 K, 5000 K, and one that reports no `temp` at
-//!   all. The app does not offer them, and neither does `pywizlight`, openHAB
-//!   or WiZ's own table. They are named **here and nowhere else**: Soft white,
-//!   Crisp white and Unknown white, chosen to describe where each was measured
-//!   to sit rather than to claim a name WiZ uses. The last is a placeholder —
-//!   it renders white and reports no temperature, so it has not been placed on
-//!   the scale yet.
+//! - Ids **`38` and `39`** are real scenes that nothing in the ecosystem lists —
+//!   static whites at 3500 K and 5000 K. The app does not offer them, and
+//!   neither does `pywizlight`, openHAB or WiZ's own table. They are named
+//!   **here and nowhere else**, Soft white and Crisp white, after where each
+//!   was measured to sit. Both reach full brightness: alternated against their
+//!   own colour temperatures at `dimming: 100`, neither is distinguishable.
+//! - Id **`41` is a scene this crate refuses to send.** It renders a white of
+//!   roughly 6200 K, but at `dimming: 100` it emits about a *third* of what
+//!   every other white emits at `dimming: 100`. It honours `dimming`
+//!   underneath that ceiling — pulsing it 100 to 10 is plainly visible — so the
+//!   parameter is not ignored; the **scale** is simply not the same one, and a
+//!   caller asking for full brightness quietly gets a third of it. See
+//!   [`SceneId::new`]. It is still named on the way *in*, because `42..=248`
+//!   all clamp onto it and a bulb can therefore be found sitting there.
 //! - Id **`37` is not a scene.** Writing it is accepted and puts the bulb in
 //!   colour-temperature mode, reporting `sceneId: 0, temp: 2200`. It is an
 //!   alias for a CCT, so [`SceneId`] refuses it and says what to send instead.
@@ -180,9 +186,9 @@ const FIXED: Adjustable = Adjustable {
 
 /// The table, in id order.
 ///
-/// Note the gap: `37` is missing because it is not a scene, and `41` is the
-/// last one because everything above it clamps onto it. See the
-/// [module docs](self).
+/// Note the two gaps. `37` is not a scene at all, and `41` is one the bulb
+/// plays but this crate will not send — both are refused by [`SceneId`], which
+/// explains why. See the [module docs](self).
 const SCENES: &[Scene] = &[
     Scene::new(1, "Ocean", Category::Dynamic, RGB, PACED),
     Scene::new(2, "Romance", Category::Dynamic, RGB, PACED),
@@ -245,9 +251,8 @@ const SCENES: &[Scene] = &[
     Scene::white(38, "Soft white", 3500, RGB),
     Scene::white(39, "Crisp white", 5000, RGB),
     Scene::new(40, "Dim-to-warm", Category::White, RGB | TW, DIMMABLE),
-    // A white that reports no `temp`, unlike every other one, so we cannot say
-    // where on the scale it sits. Named for what is not known about it.
-    Scene::new(41, "Unknown white", Category::White, RGB, DIMMABLE),
+    // 41 is deliberately absent, though the bulb plays it: its brightness scale
+    // does not match anything else's. See `SceneId::new`.
 ];
 
 impl Scene {
@@ -347,12 +352,12 @@ impl Scene {
 
     /// Its display name.
     ///
-    /// Every name is WiZ's own, taken from the app, **except three**. `38`,
-    /// `39` and `41` are real scenes that no documentation, no library and not
-    /// even the WiZ app gives a name to, so they are called **Soft white**
-    /// (3500 K), **Crisp white** (5000 K) and **Unknown white** — descriptions
-    /// of where they were measured to sit, not names anyone else will
-    /// recognise. Match on [`id`](Scene::id) if that distinction matters.
+    /// Every name is WiZ's own, taken from the app, **except two**. `38` and
+    /// `39` are real scenes that no documentation, no library and not even the
+    /// WiZ app gives a name to, so they are called **Soft white** (3500 K) and
+    /// **Crisp white** (5000 K) — descriptions of where they were measured to
+    /// sit, not names anyone else will recognise. Match on
+    /// [`id`](Scene::id) if that distinction matters.
     #[must_use]
     pub const fn name(self) -> &'static str {
         self.name
@@ -399,9 +404,8 @@ impl Scene {
     /// `34..=36` and `40`. The two agree exactly on tunable white and disagree
     /// on dimmable white, where WiZ also lists Cool white, Golden white and
     /// Diwali; WiZ is followed here, though its prose contradicts its own
-    /// table. Soft white, Crisp white and Unknown white are reported
-    /// colour-only because that is the only class they have been seen on, not
-    /// because anything says so.
+    /// table. Soft white and Crisp white are reported colour-only because that
+    /// is the only class they have been seen on, not because anything says so.
     ///
     /// Sockets and dimmable fans play nothing. A tunable-white fan gets the
     /// tunable-white list, since its light is one — `pywizlight` returns
@@ -454,16 +458,18 @@ mod tests {
 
     /// The shape of the table, and the id gaps that are the whole story: no
     /// `37`, and nothing above `41`.
+    /// The two gaps are the point. `37` is not a scene, and `41` is one the
+    /// bulb plays but the crate will not send.
     #[test]
-    fn the_table_covers_the_measured_scene_space() {
+    fn the_table_covers_the_scenes_worth_sending() {
         let ids: Vec<u16> = Scene::all().iter().map(|s| s.id().get()).collect();
-        let expected: Vec<u16> = (1..=36).chain(38..=41).collect();
+        let expected: Vec<u16> = (1..=36).chain(38..=40).collect();
         assert_eq!(ids, expected);
     }
 
     #[test]
     fn per_class_counts() {
-        assert_eq!(Scene::for_class(BulbClass::Rgb).count(), 40);
+        assert_eq!(Scene::for_class(BulbClass::Rgb).count(), 39);
         assert_eq!(Scene::for_class(BulbClass::Tw).count(), 17);
         assert_eq!(Scene::for_class(BulbClass::Dw).count(), 11);
         // A tunable-white fan is a tunable-white light with a fan attached.
@@ -518,16 +524,12 @@ mod tests {
         }
     }
 
-    /// Three names are ours rather than WiZ's, and they are the ones a reader
-    /// is most likely to mistake for official. Pinned so that renaming one is a
+    /// Two names are ours rather than WiZ's, and they are the ones a reader is
+    /// most likely to mistake for official. Pinned so that renaming one is a
     /// deliberate act.
     #[test]
-    fn the_three_scenes_nobody_names_are_labelled_by_us() {
-        let ours = [
-            (38, "Soft white"),
-            (39, "Crisp white"),
-            (41, "Unknown white"),
-        ];
+    fn the_two_scenes_nobody_names_are_labelled_by_us() {
+        let ours = [(38, "Soft white"), (39, "Crisp white")];
         for (id, name) in ours {
             let scene = Scene::from_id(id).unwrap();
             assert_eq!(scene.name(), name);
@@ -535,9 +537,9 @@ mod tests {
             // Named after where they sit, so they have to be findable that way.
             assert_eq!(Scene::from_name(name).unwrap().id().get(), id);
         }
-        // Unknown white is the placeholder: it renders white and reports no
-        // temperature, so it has not been placed on the scale.
-        assert_eq!(Scene::from_id(41).unwrap().kelvin(), None);
+        // 41 would have been the third, and is deliberately absent: the bulb
+        // plays it, but at a third of every other scene's brightness.
+        assert_eq!(Scene::from_id(41), None);
     }
 
     #[test]
@@ -585,9 +587,9 @@ mod tests {
     #[test]
     fn ids_that_are_not_scenes_are_none() {
         // 0 means "no scene" on a read; 37 writes a colour temperature rather
-        // than a scene; 42 and up clamp onto 41; 256 is a user slot; 1000 was
-        // Rhythm, and is refused outright.
-        for id in [0, 37, 42, 100, 248, 256, 265, 1000] {
+        // than a scene; 41 is played by the bulb but not offered here; 42 and
+        // up clamp onto 41; 256 is a user slot; 1000 was Rhythm.
+        for id in [0, 37, 41, 42, 100, 248, 256, 265, 1000] {
             assert_eq!(Scene::from_id(id), None, "{id}");
         }
     }
@@ -648,8 +650,9 @@ mod tests {
         for scene in Scene::all().iter().filter(|s| s.kelvin().is_some()) {
             assert_eq!(scene.category(), Category::White, "{scene}");
         }
+        // Dim-to-warm varies its own temperature by brightness, which is the
+        // whole point of it, so it reports none.
         assert_eq!(Scene::from_id(40).unwrap().kelvin(), None);
-        assert_eq!(Scene::from_id(41).unwrap().kelvin(), None);
     }
 
     #[test]

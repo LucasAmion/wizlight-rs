@@ -122,13 +122,14 @@ open_newtype! {
 ///
 /// | Written | What happens |
 /// | --- | --- |
-/// | `1..=36`, `38..=41` | a scene plays |
+/// | `1..=36`, `38..=40` | a scene plays |
 /// | `256..=265` | a custom mode made in the app plays, **if that slot holds one** |
 /// | `37` | accepted, and sets a 2200 K colour temperature instead |
+/// | `41` | accepted, and plays a ~6200 K white at a third of normal brightness |
 /// | `42..=248` | accepted, and **clamped to `41`** |
 /// | `0`, `249..=255`, `266+`, `1000` | `-32602` |
 ///
-/// The middle two are why this is checked at all: the bulb answers `success`
+/// The middle three are why this is checked at all: the bulb answers `success`
 /// and does something the caller did not ask for.
 ///
 /// ```
@@ -136,8 +137,9 @@ open_newtype! {
 ///
 /// assert_eq!(SceneId::new(4)?.scene().map(|s| s.name()), Some("Party"));
 ///
-/// // Accepted by the bulb, and does not do what it looks like it does.
+/// // Accepted by the bulb, and none of them does what it looks like it does.
 /// assert!(SceneId::new(37).is_err());   // sets 2200 K, leaves scene mode
+/// assert!(SceneId::new(41).is_err());   // a third of normal brightness
 /// assert!(SceneId::new(100).is_err());  // silently clamps to 41
 /// # Ok::<(), wizlight::Error>(())
 /// ```
@@ -157,9 +159,9 @@ impl SceneId {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnknownScene`] if the id is not one the bulb plays.
-    /// `37` and `42..=248` are refused despite being accepted on the wire; the
-    /// message says what each of them really does.
+    /// Returns [`Error::UnknownScene`] if the id is not one worth sending.
+    /// `37`, `41` and `42..=248` are refused despite being accepted on the
+    /// wire; the message says what each of them really does.
     pub fn new(value: u16) -> Result<Self> {
         if Scene::from_id(value).is_some() || USER_SLOTS.contains(&value) {
             return Ok(Self(value));
@@ -168,13 +170,27 @@ impl SceneId {
             37 => " — writing 37 leaves scene mode and sets a 2200 K colour \
                    temperature, so send `temp: 2200` if that is what you meant"
                 .to_owned(),
+            // Measured: 41 renders a white of roughly 6200 K, but its
+            // `dimming: 100` is about a third of every other scene's. It obeys
+            // `dimming` below that ceiling, so the parameter is not ignored —
+            // the scale is a different one, and a caller asking for full
+            // brightness quietly gets a third of it.
+            41 => " — 41 plays a white of about 6200 K at roughly a third of \
+                   normal brightness, and no `dimming` recovers the rest, so \
+                   send `temp: 6200` instead"
+                .to_owned(),
             42..=248 => {
-                format!(" — the bulb accepts {value} and silently clamps it to 41, the last scene")
+                format!(
+                    " — the bulb accepts {value} and silently clamps it to 41, which is \
+                     itself refused here"
+                )
             }
             _ => String::new(),
         };
         Err(Error::UnknownScene {
-            message: format!("{value} is not a scene: ids run 1..=36 and 38..=41{detail}"),
+            message: format!(
+                "{value} is not a scene worth sending: ids run 1..=36 and 38..=40{detail}"
+            ),
         })
     }
 
@@ -383,7 +399,7 @@ mod tests {
     #[test]
     fn a_scene_id_has_to_be_one_the_bulb_plays() {
         assert_eq!(SceneId::new(4).unwrap().get(), 4);
-        assert_eq!(u16::from(SceneId::try_from(41).unwrap()), 41);
+        assert_eq!(u16::from(SceneId::try_from(40).unwrap()), 40);
         let deep_dive = SceneId::new(23).unwrap().scene().expect("23 is a scene");
         assert_eq!(deep_dive.name(), "Deep dive");
 
@@ -391,11 +407,15 @@ mod tests {
         for id in [0, 249, 255, 266, 1000] {
             assert!(SceneId::new(id).is_err(), "{id}");
         }
-        // Accepted by the bulb, and not doing what it looks like: 37 sets a
-        // colour temperature and leaves scene mode, and everything from 42 up
-        // clamps onto 41. Both are refused here, and both say why.
+        // Accepted by the bulb, and none of them doing what it looks like: 37
+        // sets a colour temperature and leaves scene mode, 41 plays at a third
+        // of normal brightness, and everything from 42 up clamps onto 41. All
+        // are refused here, and each says why.
         let message = SceneId::new(37).unwrap_err().to_string();
         assert!(message.contains("2200 K"), "{message}");
+        let message = SceneId::new(41).unwrap_err().to_string();
+        assert!(message.contains("6200 K"), "{message}");
+        assert!(message.contains("a third"), "{message}");
         let message = SceneId::new(100).unwrap_err().to_string();
         assert!(message.contains("clamps it to 41"), "{message}");
     }
