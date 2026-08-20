@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr};
 use crate::error::{Error, Result};
 use crate::protocol::{
     BulbData, BulbType, KelvinRange, ModelConfig, Pilot, PilotBuilder, Power, Request, Response,
-    Success, SystemConfig, UserConfig,
+    Scene, Success, SystemConfig, UserConfig,
 };
 use crate::transport::{RetryPolicy, Transport};
 
@@ -281,6 +281,34 @@ impl Bulb {
                 .or(system.white_to_color_ratio()),
             fan_speed_range: capabilities.fan_speed_range,
         })
+    }
+
+    /// Every scene this bulb can play, in id order.
+    ///
+    /// Derived from the bulb's class, so it costs what
+    /// [`bulb_type`](Bulb::bulb_type) costs — at least two round trips. A caller
+    /// that already knows the class wants [`BulbType::scenes`], and one
+    /// building a picker before any bulb is chosen wants
+    /// [`Scene::all`](crate::protocol::Scene::all): the table is a `const` and
+    /// needs no device.
+    ///
+    /// ```no_run
+    /// # use std::net::{IpAddr, Ipv4Addr};
+    /// # use wizlight::Bulb;
+    /// # async fn example() -> Result<(), wizlight::Error> {
+    /// let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
+    /// for scene in bulb.scenes().await? {
+    ///     println!("{:>3}  {scene}", scene.id().get());
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`bulb_type`](Bulb::bulb_type).
+    pub async fn scenes(&self) -> Result<Vec<Scene>> {
+        Ok(self.bulb_type().await?.scenes().collect())
     }
 
     /// Reads whichever config method the firmware answers.

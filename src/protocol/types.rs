@@ -2,7 +2,10 @@
 //!
 //! The bulb is not a reliable validator: an out-of-range `dimming` is silently
 //! clamped and still reports success, while an out-of-range `temp` errors.
-//! Ranges are therefore enforced here, before anything is serialised.
+//! Ranges are therefore enforced here, before anything is serialised. One of
+//! these is not a range at all — a [`SceneId`] is checked against the scene
+//! table, because the ids the bulb accepts are a superset of the scenes it can
+//! play.
 //!
 //! These are **write-side** types. Nothing here implements `Deserialize`, and
 //! that is deliberate: a bulb is free to *report* a value these constructors
@@ -12,6 +15,7 @@
 
 use serde::Serialize;
 
+use super::scene::Scene;
 use crate::error::{Error, Result};
 
 /// Defines a newtype whose range is checked on construction.
@@ -110,23 +114,165 @@ open_newtype! {
     Channel(u8)
 }
 
-open_newtype! {
-    /// A WiZ scene identifier.
+/// A WiZ scene identifier: an id the bulb will actually play.
+///
+/// That is a shorter list than the one it accepts. Measured on
+/// `ESP25_SHRGB_01` fw 1.38.0, writing a `sceneId` has four outcomes, and only
+/// the first is worth sending:
+///
+/// | Written | What happens |
+/// | --- | --- |
+/// | `1..=36`, `38..=40` | a scene plays |
+/// | `256..=265` | a custom mode made in the app plays, **if that slot holds one** |
+/// | `37` | accepted, and sets a 2200 K colour temperature instead |
+/// | `41` | accepted, and plays a ~6200 K white at a third of normal brightness |
+/// | `42..=248` | accepted, and **clamped to `41`** |
+/// | `0`, `249..=255`, `266+`, `1000` | `-32602` |
+///
+/// The middle three are why this is checked at all: the bulb answers `success`
+/// and does something the caller did not ask for.
+///
+/// ```
+/// use wizlight::protocol::SceneId;
+///
+/// assert_eq!(SceneId::new(4)?.scene().map(|s| s.name()), Some("Party"));
+///
+/// // Accepted by the bulb, and none of them does what it looks like it does.
+/// assert!(SceneId::new(37).is_err());   // sets 2200 K, leaves scene mode
+/// assert!(SceneId::new(41).is_err());   // a third of normal brightness
+/// assert!(SceneId::new(100).is_err());  // silently clamps to 41
+/// # Ok::<(), wizlight::Error>(())
+/// ```
+///
+/// This is the **write** side. A bulb reports ids this type will not hold —
+/// notably `0`, for "no scene, colour is active" — so
+/// [`Pilot::scene_id`](super::Pilot) is a plain `u16` and
+/// [`Scene::from_id`] is how it gets a name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct SceneId(u16);
+
+/// The ids of the ten user slots, `256..=265`.
+const USER_SLOTS: std::ops::RangeInclusive<u16> = 256..=265;
+
+impl SceneId {
+    /// Builds a `sceneId` from a scene id or a user slot id.
     ///
-    /// Measured on `ESP25_SHRGB_01` fw 1.38.0: a write is accepted for
-    /// `1..=248` and refused with `-32602` outside it. That is a range check
-    /// and not a scene table — the bulb takes ids far beyond the scenes it can
-    /// actually play — so which ids do something useful is a per-model
-    /// question, and one this type does not try to answer.
+    /// # Errors
     ///
-    /// `0` is refused on a write but *is* reported on a read, where it means
-    /// "no scene, colour is active"; see [`Pilot::scene_id`](super::Pilot).
+    /// Returns [`Error::UnknownScene`] if the id is not one worth sending.
+    /// `37`, `41` and `42..=248` are refused despite being accepted on the
+    /// wire; the message says what each of them really does.
+    pub fn new(value: u16) -> Result<Self> {
+        if Scene::from_id(value).is_some() || USER_SLOTS.contains(&value) {
+            return Ok(Self(value));
+        }
+        let detail = match value {
+            37 => " — writing 37 leaves scene mode and sets a 2200 K colour \
+                   temperature, so send `temp: 2200` if that is what you meant"
+                .to_owned(),
+            // Measured: 41 renders a white of roughly 6200 K, but its
+            // `dimming: 100` is about a third of every other scene's. It obeys
+            // `dimming` below that ceiling, so the parameter is not ignored —
+            // the scale is a different one, and a caller asking for full
+            // brightness quietly gets a third of it.
+            41 => " — 41 plays a white of about 6200 K at roughly a third of \
+                   normal brightness, and no `dimming` recovers the rest, so \
+                   send `temp: 6200` instead"
+                .to_owned(),
+            42..=248 => {
+                format!(
+                    " — the bulb accepts {value} and silently clamps it to 41, which is \
+                     itself refused here"
+                )
+            }
+            _ => String::new(),
+        };
+        Err(Error::UnknownScene {
+            message: format!(
+                "{value} is not a scene worth sending: ids run 1..=36 and 38..=40{detail}"
+            ),
+        })
+    }
+
+    /// Builds the id of one of the ten user slots, `slot` counted from 1.
     ///
-    /// Construction stays infallible despite the measured bound. Scene
-    /// availability varies by firmware and model, and pinning the type to one
-    /// bulb's range would refuse ids that another may accept. The bulb is the
-    /// authority until there is a scene table to consult.
-    SceneId(u16)
+    /// A slot holds a custom light mode created in the WiZ app. **Saving one
+    /// populates the slot** — playing it is not needed — and slots fill in
+    /// order, so the first custom mode saved is slot 1. A write to a slot that
+    /// holds nothing is refused by the bulb with `-32602`, and there is no way
+    /// to ask which slots are populated other than by trying.
+    ///
+    /// ```
+    /// use wizlight::protocol::SceneId;
+    ///
+    /// assert_eq!(SceneId::user_slot(1)?.get(), 256);
+    /// assert_eq!(SceneId::user_slot(1)?.scene(), None);  // nothing names it
+    /// assert!(SceneId::user_slot(11).is_err());
+    /// # Ok::<(), wizlight::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnknownScene`] unless `slot` is in `1..=10`.
+    pub fn user_slot(slot: u8) -> Result<Self> {
+        if (1..=10).contains(&slot) {
+            Ok(Self(255 + u16::from(slot)))
+        } else {
+            Err(Error::UnknownScene {
+                message: format!("there are ten user slots, 1..=10, and {slot} is not one"),
+            })
+        }
+    }
+
+    /// Builds one from an id already known to be playable.
+    pub(super) const fn new_unchecked(value: u16) -> Self {
+        Self(value)
+    }
+
+    /// The raw value.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+
+    /// The scene it names, or `None` for a user slot.
+    ///
+    /// A custom mode is whatever its owner made in the app, so there is nothing
+    /// to look up — not a name, not whether it animates.
+    #[must_use]
+    pub fn scene(self) -> Option<Scene> {
+        Scene::from_id(self.0)
+    }
+
+    /// Which user slot this is, counted from 1, if it is one.
+    #[must_use]
+    pub fn as_user_slot(self) -> Option<u8> {
+        USER_SLOTS.contains(&self.0).then(|| (self.0 - 255) as u8)
+    }
+
+    /// Whether a `speed` sent with this scene would do anything.
+    ///
+    /// True for a scene whose rate can be set, and for a user slot, where the
+    /// custom mode may well be a dynamic one — measured: a custom mode honours
+    /// both a `speed` sent with it and one sent afterwards.
+    #[must_use]
+    pub fn takes_speed(self) -> bool {
+        self.scene().is_none_or(|scene| scene.adjustable().speed)
+    }
+}
+
+impl TryFrom<u16> for SceneId {
+    type Error = Error;
+
+    fn try_from(value: u16) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<SceneId> for u16 {
+    fn from(value: SceneId) -> Self {
+        value.0
+    }
 }
 
 bounded_newtype! {
@@ -149,7 +295,13 @@ bounded_newtype! {
     ///
     /// Measured on `ESP25_SHRGB_01` fw 1.38.0: `9` and `201` are refused with
     /// `-32602`, `10` and `200` are accepted. Unlike `dimming`, the bulb
-    /// enforces this one itself.
+    /// enforces this one itself. WiZ's own Pro API documents the range as
+    /// 20–200; the hardware takes `10`, so the measurement wins.
+    ///
+    /// It only means something while a scene whose rate can be set is running,
+    /// and is otherwise accepted and discarded — see
+    /// [`Adjustable::speed`](super::Adjustable::speed) and
+    /// [`PilotBuilder::speed`](super::PilotBuilder::speed).
     Speed(u8), "speed", 10..=200
 }
 
@@ -236,14 +388,56 @@ mod tests {
     }
 
     #[test]
-    fn open_newtypes_accept_their_whole_range() {
+    fn every_channel_value_is_a_valid_one() {
         assert_eq!(Channel::new(0).get(), 0);
         assert_eq!(Channel::new(255).get(), 255);
         assert_eq!(Channel::from(12u8).get(), 12);
-        // Infallible on purpose: the measured 1..=248 write range is one
-        // firmware's, and the bulb is left to refuse what it does not know.
-        assert_eq!(SceneId::new(4).get(), 4);
-        assert_eq!(u16::from(SceneId::new(1000)), 1000);
+    }
+
+    /// A `sceneId` is checked against what the bulb will actually play, which
+    /// is neither the range it accepts nor the table of named scenes.
+    #[test]
+    fn a_scene_id_has_to_be_one_the_bulb_plays() {
+        assert_eq!(SceneId::new(4).unwrap().get(), 4);
+        assert_eq!(u16::from(SceneId::try_from(40).unwrap()), 40);
+        let deep_dive = SceneId::new(23).unwrap().scene().expect("23 is a scene");
+        assert_eq!(deep_dive.name(), "Deep dive");
+
+        // Refused by the bulb outright.
+        for id in [0, 249, 255, 266, 1000] {
+            assert!(SceneId::new(id).is_err(), "{id}");
+        }
+        // Accepted by the bulb, and none of them doing what it looks like: 37
+        // sets a colour temperature and leaves scene mode, 41 plays at a third
+        // of normal brightness, and everything from 42 up clamps onto 41. All
+        // are refused here, and each says why.
+        let message = SceneId::new(37).unwrap_err().to_string();
+        assert!(message.contains("2200 K"), "{message}");
+        let message = SceneId::new(41).unwrap_err().to_string();
+        assert!(message.contains("6200 K"), "{message}");
+        assert!(message.contains("a third"), "{message}");
+        let message = SceneId::new(100).unwrap_err().to_string();
+        assert!(message.contains("clamps it to 41"), "{message}");
+    }
+
+    /// The user slots are not scenes and have no names, but they are
+    /// addressable — measured, once a custom mode is saved into one.
+    #[test]
+    fn the_user_slots_are_addressable() {
+        for (slot, id) in [(1u8, 256u16), (2, 257), (10, 265)] {
+            let scene_id = SceneId::user_slot(slot).unwrap();
+            assert_eq!(scene_id.get(), id);
+            assert_eq!(scene_id.as_user_slot(), Some(slot));
+            // Nothing to look up: a custom mode is whatever its owner made.
+            assert_eq!(scene_id.scene(), None);
+            // And it may well be a dynamic one, so a speed is allowed.
+            assert!(scene_id.takes_speed());
+            assert_eq!(SceneId::new(id).unwrap(), scene_id);
+        }
+
+        assert!(SceneId::user_slot(0).is_err());
+        assert!(SceneId::user_slot(11).is_err());
+        assert_eq!(SceneId::new(4).unwrap().as_user_slot(), None);
     }
 
     #[test]

@@ -103,6 +103,114 @@ async fn out_of_range_temperature_and_scene_are_rejected() {
     assert_eq!(bulb.pilot()["temp"], 2700);
 }
 
+/// The harness has to be as unhelpful as the hardware here: an id past the last
+/// scene is **accepted and clamped**, so nothing may treat a `success` as
+/// evidence that the scene asked for is the one playing.
+#[tokio::test]
+async fn scene_ids_past_the_last_scene_are_accepted_and_clamped() {
+    let bulb = MockBulb::start().await;
+    let client = Client::new().await;
+
+    let set = |scene: i64| {
+        client.ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"sceneId": scene}}),
+        )
+    };
+
+    for scene in [1, 36, 41] {
+        assert_eq!(set(scene).await["result"]["success"], true, "{scene}");
+        assert_eq!(bulb.pilot()["sceneId"], scene);
+    }
+
+    // Everything from 42 up answers success and plays 41 instead.
+    for scene in [42, 100, 248] {
+        assert_eq!(set(scene).await["result"]["success"], true, "{scene}");
+        assert_eq!(bulb.pilot()["sceneId"], 41, "{scene} should clamp");
+    }
+
+    // 37 is not a scene at all: it sets a colour temperature and leaves scene
+    // mode, which is why the crate refuses to send it.
+    assert_eq!(set(37).await["result"]["success"], true);
+    assert_eq!(bulb.pilot()["sceneId"], 0);
+    assert_eq!(bulb.pilot()["temp"], 2200);
+
+    // 0 is read-only, 249 is past the end, 256 is a user slot this bulb has
+    // never had a custom mode saved into, and 1000 was Rhythm.
+    for scene in [0, 249, 256, 265, 1000] {
+        assert_eq!(set(scene).await["error"]["code"], -32602, "{scene}");
+    }
+    assert_eq!(bulb.pilot()["sceneId"], 0, "a refusal changes nothing");
+}
+
+/// A user slot accepts a write only once a custom mode has been saved into it,
+/// and slots fill in order. This is what made `256` look permanently refused
+/// until a custom mode existed to occupy it.
+#[tokio::test]
+async fn user_slots_work_only_when_populated() {
+    let bulb = MockBulb::builder().custom_modes(2).start().await;
+    let client = Client::new().await;
+
+    for slot in [256, 257] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"sceneId": slot}}),
+            )
+            .await;
+        assert_eq!(reply["result"]["success"], true, "{slot}");
+        assert_eq!(bulb.pilot()["sceneId"], slot);
+        // Measured: a custom mode may be a dynamic one, and takes a speed.
+        assert_eq!(bulb.pilot()["speed"], 100);
+    }
+
+    for slot in [258, 265] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"sceneId": slot}}),
+            )
+            .await;
+        assert_eq!(reply["error"]["code"], -32602, "{slot} is an empty slot");
+    }
+}
+
+/// `getPilot` carries `speed` and `dimming` only where the running scene uses
+/// them, which is the only way to tell which scenes take which.
+#[tokio::test]
+async fn a_running_scene_reports_only_the_parameters_it_uses() {
+    let bulb = MockBulb::start().await;
+    let client = Client::new().await;
+
+    let cases = [
+        // scene, speed?, dimming?, temp
+        (4, true, true, None),         // Party: animates, rate settable
+        (29, false, true, None),       // Candlelight: animates, rate is not
+        (14, false, false, None),      // Night light: neither applies
+        (11, false, true, Some(2700)), // Warm white: a static white
+    ];
+
+    for (scene, speed, dimming, temp) in cases {
+        client
+            .ask(
+                bulb.addr(),
+                json!({
+                    "method": "setPilot",
+                    "params": {"sceneId": scene, "speed": 150, "dimming": 40},
+                }),
+            )
+            .await;
+        let pilot = bulb.pilot();
+        assert_eq!(pilot.get("speed").is_some(), speed, "{scene} speed");
+        assert_eq!(pilot.get("dimming").is_some(), dimming, "{scene} dimming");
+        assert_eq!(
+            pilot.get("temp").and_then(serde_json::Value::as_i64),
+            temp,
+            "{scene} temp"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_temperature_outside_the_model_range_is_clamped_not_rejected() {
     // Measured on ESP25_SHRGB_01 fw 1.38.0, which reports a cctRange of

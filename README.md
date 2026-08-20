@@ -27,7 +27,7 @@ real-time control, and it is the protocol layer underneath
   broadcast address from the local interfaces
 - ~~`getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
   requests and responses~~ — done
-- Bulb model parsing: capabilities, scene support and Kelvin range
+- ~~Bulb model parsing: capabilities, scene support and Kelvin range~~ — done
 - RGB ↔ RGB+CW conversion, cross-checked against `pywizlight`
 - A rate-limited streaming path for driving bulbs from live audio or video
 - `syncPilot` push updates
@@ -70,9 +70,10 @@ async fn main() -> Result<(), wizlight::Error> {
 ```
 
 Every channel value is a valid one, so `Channel::new` cannot fail. The types
-that *do* have a range — `Dimming`, `Kelvin`, `Speed`, `Ratio`, `Devices` —
-return a `Result`, because the bulb is not a reliable validator: it silently
-clamps an out-of-range `dimming` and reports success.
+that *do* have a range — `Dimming`, `Kelvin`, `Speed`, `Ratio`, `Devices`, and
+`SceneId` against the scene table — return a `Result`, because the bulb is not a
+reliable validator: it silently clamps an out-of-range `dimming` and reports
+success.
 
 Colour, colour temperature and scene are mutually exclusive in one request, and
 asking for two of them fails at build time rather than silently picking one:
@@ -85,6 +86,51 @@ let clash = PilotBuilder::new()
     .temp(Kelvin::new(2700).expect("2700 K is in range"))
     .set_pilot();
 assert!(clash.is_err());
+```
+
+Scenes — WiZ calls them light modes — are effects the bulb animates by itself,
+and the table of them is a `const`, so a scene picker needs no bulb and nothing
+to await:
+
+```rust
+use wizlight::protocol::{BulbClass, Scene};
+
+// Names are matched ignoring case and punctuation, so the spellings used by
+// pywizlight, openHAB and WiZ's own docs all resolve.
+let scene = Scene::from_name("deep-dive").expect("Deep dive is a scene");
+assert_eq!(scene.id().get(), 23);
+assert_eq!(scene.name(), "Deep dive");
+
+// 39 scenes for a colour bulb, 17 for tunable white, 11 for dimmable white.
+assert_eq!(Scene::for_class(BulbClass::Tw).count(), 17);
+
+// Animating and taking a `speed` are different questions: Wake up ramps over
+// minutes at a rate set in the app, so the builder refuses a `speed` for it.
+assert!(scene.animates() && scene.adjustable().speed);
+let wake_up = Scene::from_id(9).expect("9 is Wake up");
+assert!(wake_up.animates() && !wake_up.adjustable().speed);
+```
+
+The table is **measured, not transcribed**: every id was written to an
+`ESP25_SHRGB_01` on fw 1.38.0 and read back, and the WiZ app was walked through
+mode by mode to name them. The bulb reports `speed` and `dimming` only where the
+running scene uses them, which makes both directly observable — and corrects
+WiZ's own published table in two places.
+
+A `SceneId` therefore has to be an id the bulb will actually *play*, which is
+narrower than what it accepts. `37` sets a colour temperature instead of a
+scene, and `42`–`248` are silently clamped to `41`; both answer `success`, and
+both are refused here with a message saying what they really do. Custom light
+modes made in the app are addressable as user slots:
+
+```rust
+use wizlight::protocol::SceneId;
+
+let first_custom_mode = SceneId::user_slot(1).expect("there are ten slots");
+assert_eq!(first_custom_mode.get(), 256);
+
+assert!(SceneId::new(37).is_err());   // really sets 2200 K
+assert!(SceneId::new(100).is_err());  // really plays 41
 ```
 
 Bulbs are found by broadcasting, and reported as they answer rather than in a

@@ -35,6 +35,7 @@ use std::str::FromStr;
 
 use serde::{Serialize, Serializer};
 
+use super::scene::Scene;
 use crate::error::{Error, Result};
 
 /// The classes of device a `moduleName` can name.
@@ -563,6 +564,37 @@ impl BulbType {
             fan_speed_range: data.fan_speed_range,
             derivation,
         })
+    }
+
+    /// Every scene *this device* can play, in id order.
+    ///
+    /// The class decides which scenes exist — see [`Scene::for_class`] — and
+    /// [`Features::effect`] decides whether the device plays any at all: a
+    /// `DIMTRIACS` wall switch is dimmable white, and the dimmable white scenes
+    /// are not available to it.
+    ///
+    /// ```
+    /// use wizlight::protocol::{BulbData, BulbType, KelvinRange};
+    ///
+    /// let bulb_type = BulbType::from_data(&BulbData {
+    ///     module_name: Some("ESP25_SHRGB_01"),
+    ///     kelvin_range: Some(KelvinRange::new(2200, 6500)),
+    ///     ..BulbData::default()
+    /// })?;
+    /// assert_eq!(bulb_type.scenes().count(), 39);
+    /// # Ok::<(), wizlight::Error>(())
+    /// ```
+    pub fn scenes(&self) -> impl Iterator<Item = Scene> {
+        let class = self.class;
+        let table: &'static [Scene] = if self.features.effect {
+            Scene::all()
+        } else {
+            &[]
+        };
+        table
+            .iter()
+            .copied()
+            .filter(move |scene| scene.available_for(class))
     }
 }
 
