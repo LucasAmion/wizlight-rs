@@ -456,10 +456,9 @@ fn normalised(name: &str) -> impl Iterator<Item = char> + '_ {
 mod tests {
     use super::*;
 
-    /// The shape of the table, and the id gaps that are the whole story: no
-    /// `37`, and nothing above `41`.
-    /// The two gaps are the point. `37` is not a scene, and `41` is one the
-    /// bulb plays but the crate will not send.
+    /// The shape of the table, and the two gaps that are the whole story: `37`
+    /// is not a scene at all, and `41` is one the bulb plays but the crate will
+    /// not send.
     #[test]
     fn the_table_covers_the_scenes_worth_sending() {
         let ids: Vec<u16> = Scene::all().iter().map(|s| s.id().get()).collect();
