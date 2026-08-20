@@ -152,8 +152,10 @@ flags only Night light as undimmable, where **Wake up** and **Alarm** ignore
   read the state back, and so concluded the bulb takes ~200 ids that name
   nothing. It does not.
 - **`38`, `39` and `41` are real scenes no source lists** — static whites at
-  3500 K, 5000 K and one that reports no `temp` at all. `Scene::name` is `None`
-  for them, and `Display` writes `Scene 38`.
+  3500 K, 5000 K and one that reports no `temp` at all. They are named here and
+  nowhere else: **Soft white**, **Crisp white** and **Unknown white**,
+  descriptions of where each was measured to sit rather than names WiZ uses.
+  The last is a placeholder until it can be compared against the others.
 - **`37` is not a scene.** It is accepted and sets a 2200 K colour temperature,
   reporting `sceneId: 0`.
 - **The user slots work.** An earlier measurement found `256` refused and

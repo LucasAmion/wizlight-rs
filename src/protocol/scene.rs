@@ -43,7 +43,11 @@
 //! - Ids **`38`, `39` and `41`** are real scenes that nothing in the ecosystem
 //!   lists — static whites at 3500 K, 5000 K, and one that reports no `temp` at
 //!   all. The app does not offer them, and neither does `pywizlight`, openHAB
-//!   or WiZ's own table.
+//!   or WiZ's own table. They are named **here and nowhere else**: Soft white,
+//!   Crisp white and Unknown white, chosen to describe where each was measured
+//!   to sit rather than to claim a name WiZ uses. The last is a placeholder —
+//!   it renders white and reports no temperature, so it has not been placed on
+//!   the scale yet.
 //! - Id **`37` is not a scene.** Writing it is accepted and puts the bulb in
 //!   colour-temperature mode, reporting `sceneId: 0, temp: 2200`. It is an
 //!   alias for a CCT, so [`SceneId`] refuses it and says what to send instead.
@@ -124,7 +128,7 @@ pub struct Adjustable {
 ///
 /// let scene: Scene = "deep-dive".parse()?;
 /// assert_eq!(scene.id().get(), 23);
-/// assert_eq!(scene.name(), Some("Deep dive"));
+/// assert_eq!(scene.name(), "Deep dive");
 /// assert_eq!(scene.category(), Category::Dynamic);
 /// assert!(scene.animates() && scene.adjustable().speed);
 /// // A colour animation, so nothing without RGB emitters can play it.
@@ -138,9 +142,7 @@ pub struct Adjustable {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Scene {
     id: u16,
-    /// `None` for the three ids no source names. [`Display`](fmt::Display)
-    /// falls back to `Scene 38`.
-    name: Option<&'static str>,
+    name: &'static str,
     category: Category,
     /// The colour temperature the bulb reports while it runs, where it reports
     /// one.
@@ -239,11 +241,13 @@ const SCENES: &[Scene] = &[
     Scene::new(35, "Alarm", Category::Dynamic, RGB | TW | DW, FIXED),
     Scene::new(36, "Snowy sky", Category::Dynamic, RGB, PACED),
     // 37 is not a scene: it writes a 2200 K colour temperature.
-    Scene::unnamed(38, Some(3500)),
-    Scene::unnamed(39, Some(5000)),
+    // 38, 39 and 41 are named here and nowhere else — see `Scene::name`.
+    Scene::white(38, "Soft white", 3500, RGB),
+    Scene::white(39, "Crisp white", 5000, RGB),
     Scene::new(40, "Dim-to-warm", Category::White, RGB | TW, DIMMABLE),
-    // A white that reports no `temp`, unlike every other one.
-    Scene::unnamed(41, None),
+    // A white that reports no `temp`, unlike every other one, so we cannot say
+    // where on the scale it sits. Named for what is not known about it.
+    Scene::new(41, "Unknown white", Category::White, RGB, DIMMABLE),
 ];
 
 impl Scene {
@@ -256,7 +260,7 @@ impl Scene {
     ) -> Self {
         Self {
             id,
-            name: Some(name),
+            name,
             category,
             kelvin: None,
             classes,
@@ -268,22 +272,10 @@ impl Scene {
     const fn white(id: u16, name: &'static str, kelvin: u16, classes: u8) -> Self {
         Self {
             id,
-            name: Some(name),
+            name,
             category: Category::White,
             kelvin: Some(kelvin),
             classes,
-            adjustable: DIMMABLE,
-        }
-    }
-
-    /// One of the three scenes no source names, seen only on colour hardware.
-    const fn unnamed(id: u16, kelvin: Option<u16>) -> Self {
-        Self {
-            id,
-            name: None,
-            category: Category::White,
-            kelvin,
-            classes: RGB,
             adjustable: DIMMABLE,
         }
     }
@@ -316,9 +308,6 @@ impl Scene {
     /// `pywizlight`'s `Wake-up` and `Plantgrowth`, openHAB's `Bed Time` — which
     /// is why the rule strips separators instead of canonicalising them.
     ///
-    /// The three unnamed scenes cannot be found this way; use
-    /// [`from_id`](Scene::from_id).
-    ///
     /// # Errors
     ///
     /// Returns [`Error::UnknownScene`] if no scene matches.
@@ -326,10 +315,7 @@ impl Scene {
         SCENES
             .iter()
             .copied()
-            .find(|scene| match scene.name {
-                Some(known) => normalised(known).eq(normalised(name)),
-                None => false,
-            })
+            .find(|scene| normalised(scene.name).eq(normalised(name)))
             .ok_or_else(|| Error::UnknownScene {
                 message: format!(
                     "no scene is called `{name}`; names are matched ignoring case, spaces \
@@ -359,13 +345,16 @@ impl Scene {
         SceneId::new_unchecked(self.id)
     }
 
-    /// Its display name, where anything names it.
+    /// Its display name.
     ///
-    /// `None` for `38`, `39` and `41`, which are real scenes that no
-    /// documentation, no library and not even the WiZ app gives a name to.
-    /// [`Display`](fmt::Display) writes `Scene 38` for those.
+    /// Every name is WiZ's own, taken from the app, **except three**. `38`,
+    /// `39` and `41` are real scenes that no documentation, no library and not
+    /// even the WiZ app gives a name to, so they are called **Soft white**
+    /// (3500 K), **Crisp white** (5000 K) and **Unknown white** — descriptions
+    /// of where they were measured to sit, not names anyone else will
+    /// recognise. Match on [`id`](Scene::id) if that distinction matters.
     #[must_use]
-    pub const fn name(self) -> Option<&'static str> {
+    pub const fn name(self) -> &'static str {
         self.name
     }
 
@@ -410,8 +399,9 @@ impl Scene {
     /// `34..=36` and `40`. The two agree exactly on tunable white and disagree
     /// on dimmable white, where WiZ also lists Cool white, Golden white and
     /// Diwali; WiZ is followed here, though its prose contradicts its own
-    /// table. The three unnamed scenes are reported colour-only because that is
-    /// the only class they have been seen on, not because anything says so.
+    /// table. Soft white, Crisp white and Unknown white are reported
+    /// colour-only because that is the only class they have been seen on, not
+    /// because anything says so.
     ///
     /// Sockets and dimmable fans play nothing. A tunable-white fan gets the
     /// tunable-white list, since its light is one — `pywizlight` returns
@@ -441,10 +431,7 @@ impl FromStr for Scene {
 
 impl fmt::Display for Scene {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.name {
-            Some(name) => f.write_str(name),
-            None => write!(f, "Scene {}", self.id),
-        }
+        f.write_str(self.name)
     }
 }
 
@@ -515,29 +502,42 @@ mod tests {
     fn ids_and_names_round_trip() {
         for scene in Scene::all() {
             assert_eq!(Scene::from_id(scene.id().get()), Some(*scene));
-            match scene.name() {
-                Some(name) => {
-                    assert_eq!(Scene::from_name(name).unwrap(), *scene);
-                    assert_eq!(scene.to_string(), name);
-                }
-                // The unnamed three are findable by id only, and label
-                // themselves rather than pretending to a name.
-                None => assert_eq!(scene.to_string(), format!("Scene {}", scene.id().get())),
-            }
+            assert_eq!(Scene::from_name(scene.name()).unwrap(), *scene);
+            assert_eq!(scene.to_string(), scene.name());
         }
     }
 
     #[test]
     fn names_are_unique() {
         for scene in Scene::all() {
-            let Some(name) = scene.name() else { continue };
             let clashes = Scene::all()
                 .iter()
-                .filter_map(|other| other.name())
-                .filter(|other| normalised(other).eq(normalised(name)))
+                .filter(|other| normalised(other.name()).eq(normalised(scene.name())))
                 .count();
-            assert_eq!(clashes, 1, "`{name}` is not a unique name");
+            assert_eq!(clashes, 1, "`{scene}` is not a unique name");
         }
+    }
+
+    /// Three names are ours rather than WiZ's, and they are the ones a reader
+    /// is most likely to mistake for official. Pinned so that renaming one is a
+    /// deliberate act.
+    #[test]
+    fn the_three_scenes_nobody_names_are_labelled_by_us() {
+        let ours = [
+            (38, "Soft white"),
+            (39, "Crisp white"),
+            (41, "Unknown white"),
+        ];
+        for (id, name) in ours {
+            let scene = Scene::from_id(id).unwrap();
+            assert_eq!(scene.name(), name);
+            assert_eq!(scene.category(), Category::White);
+            // Named after where they sit, so they have to be findable that way.
+            assert_eq!(Scene::from_name(name).unwrap().id().get(), id);
+        }
+        // Unknown white is the placeholder: it renders white and reports no
+        // temperature, so it has not been placed on the scale.
+        assert_eq!(Scene::from_id(41).unwrap().kelvin(), None);
     }
 
     #[test]

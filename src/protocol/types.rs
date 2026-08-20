@@ -134,7 +134,7 @@ open_newtype! {
 /// ```
 /// use wizlight::protocol::SceneId;
 ///
-/// assert_eq!(SceneId::new(4)?.scene().map(|s| s.name()), Some(Some("Party")));
+/// assert_eq!(SceneId::new(4)?.scene().map(|s| s.name()), Some("Party"));
 ///
 /// // Accepted by the bulb, and does not do what it looks like it does.
 /// assert!(SceneId::new(37).is_err());   // sets 2200 K, leaves scene mode
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(SceneId::new(4).unwrap().get(), 4);
         assert_eq!(u16::from(SceneId::try_from(41).unwrap()), 41);
         let deep_dive = SceneId::new(23).unwrap().scene().expect("23 is a scene");
-        assert_eq!(deep_dive.name(), Some("Deep dive"));
+        assert_eq!(deep_dive.name(), "Deep dive");
 
         // Refused by the bulb outright.
         for id in [0, 249, 255, 266, 1000] {

@@ -99,7 +99,7 @@ use wizlight::protocol::{BulbClass, Scene};
 // pywizlight, openHAB and WiZ's own docs all resolve.
 let scene = Scene::from_name("deep-dive").expect("Deep dive is a scene");
 assert_eq!(scene.id().get(), 23);
-assert_eq!(scene.name(), Some("Deep dive"));
+assert_eq!(scene.name(), "Deep dive");
 
 // 40 scenes for a colour bulb, 17 for tunable white, 11 for dimmable white.
 assert_eq!(Scene::for_class(BulbClass::Tw).count(), 17);
