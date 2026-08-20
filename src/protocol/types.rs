@@ -114,49 +114,101 @@ open_newtype! {
     Channel(u8)
 }
 
-/// A WiZ scene identifier: an id that names a scene in [`Scene`]'s table.
+/// A WiZ scene identifier: an id the bulb will actually play.
 ///
-/// Construction goes through the table rather than through a range, because a
-/// range is not the question. Measured on `ESP25_SHRGB_01` fw 1.38.0: a write
-/// is accepted for the whole of `1..=248` and refused with `-32602` outside it,
-/// and the accepted set includes the ~200 ids that name no scene at all. So the
-/// bulb's own bound proves nothing, and `SceneId::new(100)` failing is the
-/// point — the alternative is a `success` for a scene that does not exist.
+/// That is a shorter list than the one it accepts. Measured on
+/// `ESP25_SHRGB_01` fw 1.38.0, writing a `sceneId` has four outcomes, and only
+/// the first is worth sending:
+///
+/// | Written | What happens |
+/// | --- | --- |
+/// | `1..=36`, `38..=41` | a scene plays |
+/// | `256..=265` | a custom mode made in the app plays, **if that slot holds one** |
+/// | `37` | accepted, and sets a 2200 K colour temperature instead |
+/// | `42..=248` | accepted, and **clamped to `41`** |
+/// | `0`, `249..=255`, `266+`, `1000` | `-32602` |
+///
+/// The middle two are why this is checked at all: the bulb answers `success`
+/// and does something the caller did not ask for.
 ///
 /// ```
 /// use wizlight::protocol::SceneId;
 ///
-/// assert_eq!(SceneId::new(4)?.scene().name(), "Party");
-/// // Inside the range the bulb accepts, but no scene has this id.
-/// assert!(SceneId::new(100).is_err());
+/// assert_eq!(SceneId::new(4)?.scene().map(|s| s.name()), Some(Some("Party")));
+///
+/// // Accepted by the bulb, and does not do what it looks like it does.
+/// assert!(SceneId::new(37).is_err());   // sets 2200 K, leaves scene mode
+/// assert!(SceneId::new(100).is_err());  // silently clamps to 41
 /// # Ok::<(), wizlight::Error>(())
 /// ```
 ///
-/// This is the **write** side. A bulb reports ids this type cannot hold — `0`
-/// for "no scene, colour is active", and `256..=265` for a custom mode made in
-/// the app — so [`Pilot::scene_id`](super::Pilot) is a plain `u16` and
+/// This is the **write** side. A bulb reports ids this type will not hold —
+/// notably `0`, for "no scene, colour is active" — so
+/// [`Pilot::scene_id`](super::Pilot) is a plain `u16` and
 /// [`Scene::from_id`] is how it gets a name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SceneId(u16);
 
+/// The ids of the ten user slots, `256..=265`.
+const USER_SLOTS: std::ops::RangeInclusive<u16> = 256..=265;
+
 impl SceneId {
-    /// Builds a `sceneId`.
+    /// Builds a `sceneId` from a scene id or a user slot id.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::UnknownScene`] if no scene in the table has this id.
+    /// Returns [`Error::UnknownScene`] if the id is not one the bulb plays.
+    /// `37` and `42..=248` are refused despite being accepted on the wire; the
+    /// message says what each of them really does.
     pub fn new(value: u16) -> Result<Self> {
-        Scene::from_id(value)
-            .map(Scene::id)
-            .ok_or_else(|| Error::UnknownScene {
-                message: format!(
-                    "no scene has id {value}; ids run 1..=36 and 40, and the bulb accepts \
-                     far more than it can play"
-                ),
-            })
+        if Scene::from_id(value).is_some() || USER_SLOTS.contains(&value) {
+            return Ok(Self(value));
+        }
+        let detail = match value {
+            37 => " — writing 37 leaves scene mode and sets a 2200 K colour \
+                   temperature, so send `temp: 2200` if that is what you meant"
+                .to_owned(),
+            42..=248 => {
+                format!(" — the bulb accepts {value} and silently clamps it to 41, the last scene")
+            }
+            _ => String::new(),
+        };
+        Err(Error::UnknownScene {
+            message: format!("{value} is not a scene: ids run 1..=36 and 38..=41{detail}"),
+        })
     }
 
-    /// Builds one from an id already known to be in the table.
+    /// Builds the id of one of the ten user slots, `slot` counted from 1.
+    ///
+    /// A slot holds a custom light mode created in the WiZ app. **Saving one
+    /// populates the slot** — playing it is not needed — and slots fill in
+    /// order, so the first custom mode saved is slot 1. A write to a slot that
+    /// holds nothing is refused by the bulb with `-32602`, and there is no way
+    /// to ask which slots are populated other than by trying.
+    ///
+    /// ```
+    /// use wizlight::protocol::SceneId;
+    ///
+    /// assert_eq!(SceneId::user_slot(1)?.get(), 256);
+    /// assert_eq!(SceneId::user_slot(1)?.scene(), None);  // nothing names it
+    /// assert!(SceneId::user_slot(11).is_err());
+    /// # Ok::<(), wizlight::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnknownScene`] unless `slot` is in `1..=10`.
+    pub fn user_slot(slot: u8) -> Result<Self> {
+        if (1..=10).contains(&slot) {
+            Ok(Self(255 + u16::from(slot)))
+        } else {
+            Err(Error::UnknownScene {
+                message: format!("there are ten user slots, 1..=10, and {slot} is not one"),
+            })
+        }
+    }
+
+    /// Builds one from an id already known to be playable.
     pub(super) const fn new_unchecked(value: u16) -> Self {
         Self(value)
     }
@@ -167,12 +219,29 @@ impl SceneId {
         self.0
     }
 
-    /// The scene it names.
+    /// The scene it names, or `None` for a user slot.
     ///
-    /// Infallible: an id that does not name a scene cannot be a `SceneId`.
+    /// A custom mode is whatever its owner made in the app, so there is nothing
+    /// to look up — not a name, not whether it animates.
     #[must_use]
-    pub fn scene(self) -> Scene {
-        Scene::from_id(self.0).expect("a SceneId is only built from the scene table")
+    pub fn scene(self) -> Option<Scene> {
+        Scene::from_id(self.0)
+    }
+
+    /// Which user slot this is, counted from 1, if it is one.
+    #[must_use]
+    pub fn as_user_slot(self) -> Option<u8> {
+        USER_SLOTS.contains(&self.0).then(|| (self.0 - 255) as u8)
+    }
+
+    /// Whether a `speed` sent with this scene would do anything.
+    ///
+    /// True for a scene whose rate can be set, and for a user slot, where the
+    /// custom mode may well be a dynamic one — measured: a custom mode honours
+    /// both a `speed` sent with it and one sent afterwards.
+    #[must_use]
+    pub fn takes_speed(self) -> bool {
+        self.scene().is_none_or(|scene| scene.adjustable().speed)
     }
 }
 
@@ -213,8 +282,9 @@ bounded_newtype! {
     /// enforces this one itself. WiZ's own Pro API documents the range as
     /// 20–200; the hardware takes `10`, so the measurement wins.
     ///
-    /// It only means something while a scene that animates is running — see
-    /// [`Scene::takes_speed`] and
+    /// It only means something while a scene whose rate can be set is running,
+    /// and is otherwise accepted and discarded — see
+    /// [`Adjustable::speed`](super::Adjustable::speed) and
     /// [`PilotBuilder::speed`](super::PilotBuilder::speed).
     Speed(u8), "speed", 10..=200
 }
@@ -308,20 +378,46 @@ mod tests {
         assert_eq!(Channel::from(12u8).get(), 12);
     }
 
-    /// A `sceneId` is checked against the scene table rather than against the
-    /// range the bulb accepts, which is far wider than the scenes it can play.
+    /// A `sceneId` is checked against what the bulb will actually play, which
+    /// is neither the range it accepts nor the table of named scenes.
     #[test]
-    fn a_scene_id_has_to_name_a_scene() {
+    fn a_scene_id_has_to_be_one_the_bulb_plays() {
         assert_eq!(SceneId::new(4).unwrap().get(), 4);
-        assert_eq!(u16::from(SceneId::try_from(40).unwrap()), 40);
-        assert_eq!(SceneId::new(23).unwrap().scene().name(), "Deep dive");
+        assert_eq!(u16::from(SceneId::try_from(41).unwrap()), 41);
+        let deep_dive = SceneId::new(23).unwrap().scene().expect("23 is a scene");
+        assert_eq!(deep_dive.name(), Some("Deep dive"));
 
-        // Accepted by the measured hardware, and still not a scene.
-        for id in [0, 37, 100, 248, 256, 1000] {
+        // Refused by the bulb outright.
+        for id in [0, 249, 255, 266, 1000] {
             assert!(SceneId::new(id).is_err(), "{id}");
         }
+        // Accepted by the bulb, and not doing what it looks like: 37 sets a
+        // colour temperature and leaves scene mode, and everything from 42 up
+        // clamps onto 41. Both are refused here, and both say why.
+        let message = SceneId::new(37).unwrap_err().to_string();
+        assert!(message.contains("2200 K"), "{message}");
         let message = SceneId::new(100).unwrap_err().to_string();
-        assert!(message.contains("no scene has id 100"), "{message}");
+        assert!(message.contains("clamps it to 41"), "{message}");
+    }
+
+    /// The user slots are not scenes and have no names, but they are
+    /// addressable — measured, once a custom mode is saved into one.
+    #[test]
+    fn the_user_slots_are_addressable() {
+        for (slot, id) in [(1u8, 256u16), (2, 257), (10, 265)] {
+            let scene_id = SceneId::user_slot(slot).unwrap();
+            assert_eq!(scene_id.get(), id);
+            assert_eq!(scene_id.as_user_slot(), Some(slot));
+            // Nothing to look up: a custom mode is whatever its owner made.
+            assert_eq!(scene_id.scene(), None);
+            // And it may well be a dynamic one, so a speed is allowed.
+            assert!(scene_id.takes_speed());
+            assert_eq!(SceneId::new(id).unwrap(), scene_id);
+        }
+
+        assert!(SceneId::user_slot(0).is_err());
+        assert!(SceneId::user_slot(11).is_err());
+        assert_eq!(SceneId::new(4).unwrap().as_user_slot(), None);
     }
 
     #[test]

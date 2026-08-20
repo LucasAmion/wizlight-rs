@@ -352,9 +352,13 @@ impl PilotBuilder {
             Some(ColourMode::Temp(_)) => {
                 refuse("this request sets `temp`, which stops any scene".to_owned())
             }
-            Some(ColourMode::Scene(scene)) if !scene.scene().takes_speed() => {
-                refuse(format!("`{}` does not animate", scene.scene().name()))
-            }
+            Some(ColourMode::Scene(scene)) if !scene.takes_speed() => refuse(format!(
+                "the rate of `{}` cannot be set",
+                scene.scene().map_or_else(
+                    || format!("scene {}", scene.get()),
+                    |scene| scene.to_string()
+                )
+            )),
             // No colour mode: the scene already running keeps playing, and this
             // is the request that changes its rate.
             _ => Ok(()),
@@ -708,7 +712,7 @@ mod tests {
     #[test]
     fn a_reported_scene_id_is_named_only_when_the_table_knows_it() {
         let named: Pilot = serde_json::from_str(r#"{"sceneId":23,"speed":100}"#).unwrap();
-        assert_eq!(named.scene().map(Scene::name), Some("Deep dive"));
+        assert_eq!(named.scene().and_then(Scene::name), Some("Deep dive"));
 
         // `0` is the bulb saying no scene is running, and 256 is a custom mode
         // made in the app. Neither is a scene this crate can name.

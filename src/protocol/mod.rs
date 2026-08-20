@@ -42,5 +42,5 @@ pub use model::{
 pub use pilot::{Pilot, PilotBuilder, PilotParams, Success};
 pub use request::Request;
 pub use response::{DeviceError, Response};
-pub use scene::{Adjustable, Scene};
+pub use scene::{Adjustable, Category, Scene};
 pub use types::{Channel, Devices, Dimming, Kelvin, Ratio, SceneId, Speed};

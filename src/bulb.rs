@@ -298,7 +298,7 @@ impl Bulb {
     /// # async fn example() -> Result<(), wizlight::Error> {
     /// let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
     /// for scene in bulb.scenes().await? {
-    ///     println!("{:>3}  {}", scene.id().get(), scene.name());
+    ///     println!("{:>3}  {scene}", scene.id().get());
     /// }
     /// # Ok(())
     /// # }

@@ -1,5 +1,5 @@
-//! The scene table: which light modes exist, what they are called, which
-//! devices can play them, and which of them animate.
+//! The scene table: which light modes exist, what they are called, how they
+//! behave, and which devices can play them.
 //!
 //! A scene — WiZ calls them "light modes" — is an effect the bulb runs by
 //! itself. One `setPilot` starts it and no further traffic is needed, which
@@ -7,60 +7,60 @@
 //!
 //! # Where this table comes from
 //!
-//! Ids `1..=33` are WiZ's own [light-mode table][pro], published with the Pro
-//! API. It is the only source that states, per mode, whether `speed` and
-//! `dimming` apply — everything else in the ecosystem lists names and ids
-//! only.
+//! Every id here was **written to an `ESP25_SHRGB_01` on fw 1.38.0 and read
+//! back**, and the WiZ app was then walked through mode by mode with `getPilot`
+//! polled throughout, so the vendor's own software supplied the names and the
+//! grouping. That measurement is the authority for this module, and it
+//! disagrees with every published source in at least one place.
 //!
-//! Ids `34..=36` and `40` are not in it. Their names and availability come from
-//! [`pywizlight`'s `scenes.py`][scenes], and nothing found so far says whether
-//! they animate, so [`Scene::adjustable`] reports `None` for them rather than a
-//! guess. `37`, `38` and `39` name nothing in any source consulted.
+//! The bulb makes it measurable by reporting only the parameters that apply: a
+//! running scene's `getPilot` carries `speed` if and only if its rate can be
+//! set, and `dimming` if and only if its brightness can be. So
+//! [`Adjustable`] is observed rather than transcribed, and it corrects
+//! [WiZ's own light-mode table][pro] twice — that table claims an adjustable
+//! speed for Cozy and Candlelight, and neither reports one. Cozy was confirmed
+//! by eye to hold still. It also under-reports the undimmable scenes, flagging
+//! only Night light where Wake up and Alarm ignore `dimming` too.
 //!
-//! **None of it is verified against hardware, and acceptance cannot verify it.**
-//! Measured on `ESP25_SHRGB_01` fw 1.38.0: a write is accepted for every
-//! `sceneId` in `1..=248`, including the ~200 that name no scene at all, so a
-//! `success` says nothing about a scene existing. Settling this needs someone
-//! looking at a bulb of each class, which is a job for the hardware pass rather
-//! than for the test suite.
+//! # Two different questions
 //!
-//! # Where the sources disagree
+//! [`Scene::animates`] and [`Adjustable::speed`] are not the same thing, and
+//! conflating them is what the published sources do:
 //!
-//! - **Dimmable white.** The vendor table also ticks `13` Cool white, `30`
-//!   Golden white and `33` Diwali for DW, where `pywizlight` does not — 11 ids
-//!   against its 8. The vendor's own prose, in the same document, contradicts
-//!   its table again and claims DW gets only Wake up, Bedtime and Night light.
-//!   The table is used here, being the primary source, and the whole
-//!   disagreement is one of the things the hardware pass should settle.
-//! - **Which modes animate.** Adafruit's CircuitPython library calls `6` Cozy
-//!   static and `9` Wake up / `10` Bedtime dynamic; the vendor table says the
-//!   opposite of all three. The vendor column is used, and note what it
-//!   actually means: Wake up and Bedtime *do* change over time, but their
-//!   duration is set in the app and there is no `speed` to send. So
-//!   [`Adjustable::speed`] is "`speed` does something", which is the question a
-//!   speed slider needs answered.
-//! - **Tunable white.** Both sources agree exactly, which is the one part of
-//!   the availability data with corroboration.
+//! - **Wake up** and **Bedtime** change over minutes, at a rate configured in
+//!   the app. The WiZ app files them under their own heading, *Progresivo* —
+//!   [`Category::Progressive`] here — and the bulb reports no `speed` for
+//!   them. They animate; their rate is not ours to set.
+//! - **Candlelight** and **Alarm** animate too, and likewise take no `speed`.
+//! - Everything under [`Category::White`] and [`Category::Functional`] holds
+//!   still.
 //!
-//! # Rhythm and the user slots
+//! So hide a speed slider on [`Adjustable::speed`], and decide whether a scene
+//! is "moving" with [`Scene::animates`].
 //!
-//! `pywizlight` also lists `1000` as Rhythm and `256..=265` as `Custom Mode
-//! 1..10`. Neither is here, and neither can be expressed as a [`SceneId`]:
-//! measured on `ESP25_SHRGB_01` fw 1.38.0, a **write** of `1000` or of anything
-//! in `256..=265` is refused with `-32602`.
+//! # What the sources got wrong
 //!
-//! The user slots are still real, on the read side and on other hardware:
-//! `pywizlight`'s mapping comes from devices that **report** `256` and up while
-//! playing a custom mode made in the app ([pywizlight#205][custom]). What
-//! addresses them for a write on this firmware was not found, and Rhythm looks
-//! like it stopped being a `sceneId` at all — WiZ documents it as an
-//! automation, and neither the vendor's light-mode table nor its Pro API
-//! mentions `1000`. So [`Scene::from_id`] answers `None` for a reported user
-//! slot, which is the honest answer rather than a name we cannot address.
+//! - Ids **`38`, `39` and `41`** are real scenes that nothing in the ecosystem
+//!   lists — static whites at 3500 K, 5000 K, and one that reports no `temp` at
+//!   all. The app does not offer them, and neither does `pywizlight`, openHAB
+//!   or WiZ's own table.
+//! - Id **`37` is not a scene.** Writing it is accepted and puts the bulb in
+//!   colour-temperature mode, reporting `sceneId: 0, temp: 2200`. It is an
+//!   alias for a CCT, so [`SceneId`] refuses it and says what to send instead.
+//! - Ids **`42..=248` are accepted and clamped to `41`**. They look valid — the
+//!   bulb answers `success` — and do something no caller asked for, so
+//!   [`SceneId`] refuses them too.
+//! - The **user slots `256..=265` work**, contradicting an earlier measurement
+//!   here that found `256` refused. The slot was simply empty: saving a custom
+//!   mode in the app makes its id writable, and saving a second one makes `257`
+//!   work while the rest stay refused. See [`SceneId::user_slot`].
+//! - Per-class availability is the **one thing still unverified**, since only
+//!   RGB hardware was on hand. It is [WiZ's table][pro] for ids `1..=33` and
+//!   `pywizlight`'s for `34..=36` and `40`, and the two disagree about
+//!   dimmable white — see [`Scene::available_for`]. `38`, `39` and `41` are
+//!   marked colour-only because that is the only class they were seen on.
 //!
 //! [pro]: https://docs.pro.wizconnected.com/#light-modes
-//! [scenes]: https://github.com/sbidy/pywizlight/blob/master/pywizlight/scenes.py
-//! [custom]: https://github.com/sbidy/pywizlight/issues/205
 
 use std::fmt;
 use std::str::FromStr;
@@ -71,54 +71,86 @@ use super::model::BulbClass;
 use super::types::SceneId;
 use crate::error::{Error, Result};
 
-/// Which pilot parameters a scene responds to, from WiZ's own light-mode table.
+/// How a scene behaves, as the WiZ app groups its light modes.
 ///
-/// Both flags describe the *scene*, not the bulb: every model takes `speed` and
-/// `dimming` on the wire, and a scene that ignores one of them still answers
-/// `success`.
+/// Taken from the app's own headings, which are the only source that separates
+/// a scene that animates from one whose rate can be set. The four scenes the
+/// app does not offer are grouped by what they were measured to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Category {
+    /// A static white. Most report the colour temperature they run at; see
+    /// [`Scene::kelvin`].
+    White,
+    /// A static scene for a purpose — reading, watching television, growing
+    /// plants.
+    Functional,
+    /// Changes over minutes, at a rate set in the WiZ app rather than by
+    /// `speed`. Wake up and Bedtime.
+    Progressive,
+    /// An animation. Most, but not all, take a `speed`.
+    Dynamic,
+}
+
+/// Which pilot parameters a scene responds to.
+///
+/// Measured, not documented: the bulb reports a parameter in `getPilot` if and
+/// only if the running scene uses it. A parameter that does not apply is still
+/// **accepted with `success` and silently discarded**, which is why this is
+/// worth knowing before sending one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Adjustable {
-    /// `speed` sets the animation rate, i.e. the scene animates.
+    /// `speed` sets the animation rate.
     ///
-    /// False for the static modes, and for the two — Wake up and Bedtime — that
-    /// change over time at a rate configured in the app instead.
+    /// False for every static scene, and also for the animating ones whose rate
+    /// is not exposed: Wake up, Bedtime, Candlelight and Alarm.
     pub speed: bool,
     /// `dimming` sets the brightness while the scene runs.
     ///
-    /// False only for Night light, which is a fixed low level. That matters to
-    /// anything modulating brightness underneath a running scene: the scene
-    /// starts, the `dimming` packets are accepted, and nothing changes.
+    /// False for Wake up, Night light and Alarm, which drive their own
+    /// brightness. Anything modulating brightness underneath a scene has to
+    /// avoid those three: the packets are accepted and nothing changes.
     pub dimming: bool,
 }
 
 /// One entry in the scene table: a light mode the bulb can play by itself.
 ///
-/// Scenes are looked up by id with [`Scene::from_id`] or by name with
+/// Looked up by id with [`Scene::from_id`] or by name with
 /// [`Scene::from_name`], listed for a class with [`Scene::for_class`], and the
 /// whole table is [`Scene::all`]. Nothing here needs a bulb, or a network.
 ///
 /// ```
-/// use wizlight::protocol::{BulbClass, Scene};
+/// use wizlight::protocol::{BulbClass, Category, Scene};
 ///
 /// let scene: Scene = "deep-dive".parse()?;
 /// assert_eq!(scene.id().get(), 23);
-/// assert_eq!(scene.name(), "Deep dive");
-/// assert!(scene.takes_speed());
+/// assert_eq!(scene.name(), Some("Deep dive"));
+/// assert_eq!(scene.category(), Category::Dynamic);
+/// assert!(scene.animates() && scene.adjustable().speed);
 /// // A colour animation, so nothing without RGB emitters can play it.
 /// assert!(!scene.available_for(BulbClass::Tw));
+///
+/// // Wake up animates too, but its rate is set in the app, not by us.
+/// let wake_up = Scene::from_id(9).expect("9 is Wake up");
+/// assert!(wake_up.animates() && !wake_up.adjustable().speed);
 /// # Ok::<(), wizlight::Error>(())
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Scene {
     id: u16,
-    name: &'static str,
+    /// `None` for the three ids no source names. [`Display`](fmt::Display)
+    /// falls back to `Scene 38`.
+    name: Option<&'static str>,
+    category: Category,
+    /// The colour temperature the bulb reports while it runs, where it reports
+    /// one.
+    kelvin: Option<u16>,
     /// Which classes can play it, as `RGB` / `TW` / `DW` bits. Not serialised:
     /// a caller with a bulb has already filtered by class, and one without has
     /// [`Scene::available_for`].
     #[serde(skip)]
     classes: u8,
-    /// `None` where no source documents the scene, rather than a guess.
-    adjustable: Option<Adjustable>,
+    adjustable: Adjustable,
 }
 
 /// Playable by full-colour devices.
@@ -128,77 +160,131 @@ const TW: u8 = 1 << 1;
 /// Playable by dimmable white devices.
 const DW: u8 = 1 << 2;
 
-/// Animates, and takes `dimming`.
-const DYNAMIC: Option<Adjustable> = Some(Adjustable {
+/// Takes both `speed` and `dimming`.
+const PACED: Adjustable = Adjustable {
     speed: true,
     dimming: true,
-});
-/// Holds still, and takes `dimming`.
-const STATIC: Option<Adjustable> = Some(Adjustable {
+};
+/// Takes `dimming` only — either static, or animating at a rate it owns.
+const DIMMABLE: Adjustable = Adjustable {
     speed: false,
     dimming: true,
-});
-/// Holds still at a fixed brightness: neither parameter does anything.
-const FIXED: Option<Adjustable> = Some(Adjustable {
+};
+/// Takes neither. Wake up, Night light and Alarm.
+const FIXED: Adjustable = Adjustable {
     speed: false,
     dimming: false,
-});
-/// In no source that states it. Not "static".
-const UNDOCUMENTED: Option<Adjustable> = None;
+};
 
-/// The table itself, in id order.
+/// The table, in id order.
 ///
-/// Ids `1..=33` — availability and both flags — are the vendor's light-mode
-/// table. `34`, `35`, `36` and `40` are `pywizlight`'s, which documents neither
-/// flag. See the [module docs](self).
+/// Note the gap: `37` is missing because it is not a scene, and `41` is the
+/// last one because everything above it clamps onto it. See the
+/// [module docs](self).
 const SCENES: &[Scene] = &[
-    Scene::new(1, "Ocean", RGB, DYNAMIC),
-    Scene::new(2, "Romance", RGB, DYNAMIC),
-    Scene::new(3, "Sunset", RGB, DYNAMIC),
-    Scene::new(4, "Party", RGB, DYNAMIC),
-    Scene::new(5, "Fireplace", RGB, DYNAMIC),
-    Scene::new(6, "Cozy", RGB | TW, DYNAMIC),
-    Scene::new(7, "Forest", RGB, DYNAMIC),
-    Scene::new(8, "Pastel colors", RGB, DYNAMIC),
-    Scene::new(9, "Wake up", RGB | TW | DW, STATIC),
-    Scene::new(10, "Bedtime", RGB | TW | DW, STATIC),
-    Scene::new(11, "Warm white", RGB | TW, STATIC),
-    Scene::new(12, "Daylight", RGB | TW, STATIC),
-    Scene::new(13, "Cool white", RGB | TW | DW, STATIC),
-    Scene::new(14, "Night light", RGB | TW | DW, FIXED),
-    Scene::new(15, "Focus", RGB | TW, STATIC),
-    Scene::new(16, "Relax", RGB | TW, STATIC),
-    Scene::new(17, "True colors", RGB, STATIC),
-    Scene::new(18, "TV time", RGB | TW, STATIC),
-    Scene::new(19, "Plant growth", RGB, STATIC),
-    Scene::new(20, "Spring", RGB, DYNAMIC),
-    Scene::new(21, "Summer", RGB, DYNAMIC),
-    Scene::new(22, "Fall", RGB, DYNAMIC),
-    Scene::new(23, "Deep dive", RGB, DYNAMIC),
-    Scene::new(24, "Jungle", RGB, DYNAMIC),
-    Scene::new(25, "Mojito", RGB, DYNAMIC),
-    Scene::new(26, "Club", RGB, DYNAMIC),
-    Scene::new(27, "Christmas", RGB, DYNAMIC),
-    Scene::new(28, "Halloween", RGB, DYNAMIC),
-    Scene::new(29, "Candlelight", RGB | TW | DW, DYNAMIC),
-    Scene::new(30, "Golden white", RGB | TW | DW, DYNAMIC),
-    Scene::new(31, "Pulse", RGB | TW | DW, DYNAMIC),
-    Scene::new(32, "Steampunk", RGB | TW | DW, DYNAMIC),
-    Scene::new(33, "Diwali", RGB | TW | DW, DYNAMIC),
-    Scene::new(34, "White", RGB | DW, UNDOCUMENTED),
-    Scene::new(35, "Alarm", RGB | TW | DW, UNDOCUMENTED),
-    Scene::new(36, "Snowy sky", RGB, UNDOCUMENTED),
-    // 37, 38 and 39 are unaccounted for; 40 is not a typo.
-    Scene::new(40, "Dim-to-warm", RGB | TW, UNDOCUMENTED),
+    Scene::new(1, "Ocean", Category::Dynamic, RGB, PACED),
+    Scene::new(2, "Romance", Category::Dynamic, RGB, PACED),
+    Scene::new(3, "Sunset", Category::Dynamic, RGB, PACED),
+    Scene::new(4, "Party", Category::Dynamic, RGB, PACED),
+    Scene::new(5, "Fireplace", Category::Dynamic, RGB, PACED),
+    // WiZ's table says this one takes a speed. It does not, and it holds still.
+    Scene::new(6, "Cozy", Category::Functional, RGB | TW, DIMMABLE),
+    Scene::new(7, "Forest", Category::Dynamic, RGB, PACED),
+    Scene::new(8, "Pastel colors", Category::Dynamic, RGB, PACED),
+    Scene::new(9, "Wake up", Category::Progressive, RGB | TW | DW, FIXED),
+    Scene::new(
+        10,
+        "Bedtime",
+        Category::Progressive,
+        RGB | TW | DW,
+        DIMMABLE,
+    ),
+    Scene::white(11, "Warm white", 2700, RGB | TW),
+    Scene::white(12, "Daylight", 4200, RGB | TW),
+    Scene::white(13, "Cool white", 6500, RGB | TW | DW),
+    Scene::new(
+        14,
+        "Night light",
+        Category::Functional,
+        RGB | TW | DW,
+        FIXED,
+    ),
+    Scene::new(15, "Focus", Category::Functional, RGB | TW, DIMMABLE),
+    Scene::new(16, "Relax", Category::Functional, RGB | TW, DIMMABLE),
+    Scene::new(17, "True colors", Category::Functional, RGB, DIMMABLE),
+    Scene::new(18, "TV time", Category::Functional, RGB | TW, DIMMABLE),
+    Scene::new(19, "Plant growth", Category::Functional, RGB, DIMMABLE),
+    Scene::new(20, "Spring", Category::Dynamic, RGB, PACED),
+    Scene::new(21, "Summer", Category::Dynamic, RGB, PACED),
+    Scene::new(22, "Fall", Category::Dynamic, RGB, PACED),
+    Scene::new(23, "Deep dive", Category::Dynamic, RGB, PACED),
+    Scene::new(24, "Jungle", Category::Dynamic, RGB, PACED),
+    Scene::new(25, "Mojito", Category::Dynamic, RGB, PACED),
+    Scene::new(26, "Club", Category::Dynamic, RGB, PACED),
+    Scene::new(27, "Christmas", Category::Dynamic, RGB, PACED),
+    Scene::new(28, "Halloween", Category::Dynamic, RGB, PACED),
+    // Animates, but the rate is not exposed — WiZ's table says otherwise.
+    Scene::new(
+        29,
+        "Candlelight",
+        Category::Dynamic,
+        RGB | TW | DW,
+        DIMMABLE,
+    ),
+    Scene::new(30, "Golden white", Category::Dynamic, RGB | TW | DW, PACED),
+    Scene::new(31, "Pulse", Category::Dynamic, RGB | TW | DW, PACED),
+    Scene::new(32, "Steampunk", Category::Dynamic, RGB | TW | DW, PACED),
+    Scene::new(33, "Diwali", Category::Dynamic, RGB | TW | DW, PACED),
+    Scene::white(34, "White", 4000, RGB | DW),
+    Scene::new(35, "Alarm", Category::Dynamic, RGB | TW | DW, FIXED),
+    Scene::new(36, "Snowy sky", Category::Dynamic, RGB, PACED),
+    // 37 is not a scene: it writes a 2200 K colour temperature.
+    Scene::unnamed(38, Some(3500)),
+    Scene::unnamed(39, Some(5000)),
+    Scene::new(40, "Dim-to-warm", Category::White, RGB | TW, DIMMABLE),
+    // A white that reports no `temp`, unlike every other one.
+    Scene::unnamed(41, None),
 ];
 
 impl Scene {
-    const fn new(id: u16, name: &'static str, classes: u8, adjustable: Option<Adjustable>) -> Self {
+    const fn new(
+        id: u16,
+        name: &'static str,
+        category: Category,
+        classes: u8,
+        adjustable: Adjustable,
+    ) -> Self {
         Self {
             id,
-            name,
+            name: Some(name),
+            category,
+            kelvin: None,
             classes,
             adjustable,
+        }
+    }
+
+    /// A static white that reports the temperature it runs at.
+    const fn white(id: u16, name: &'static str, kelvin: u16, classes: u8) -> Self {
+        Self {
+            id,
+            name: Some(name),
+            category: Category::White,
+            kelvin: Some(kelvin),
+            classes,
+            adjustable: DIMMABLE,
+        }
+    }
+
+    /// One of the three scenes no source names, seen only on colour hardware.
+    const fn unnamed(id: u16, kelvin: Option<u16>) -> Self {
+        Self {
+            id,
+            name: None,
+            category: Category::White,
+            kelvin,
+            classes: RGB,
+            adjustable: DIMMABLE,
         }
     }
 
@@ -215,8 +301,8 @@ impl Scene {
     ///
     /// This is the read-side lookup, for naming the `sceneId` in a
     /// [`Pilot`](super::Pilot). It takes a plain `u16` for that reason — a bulb
-    /// may report an id that could not be sent, including `0` for "no scene,
-    /// colour is active" and the `256..=265` user slots.
+    /// reports ids that are not scenes, including `0` for "no scene, colour is
+    /// active" and `256..=265` for a custom mode made in the app.
     #[must_use]
     pub fn from_id(id: u16) -> Option<Self> {
         SCENES.iter().copied().find(|scene| scene.id == id)
@@ -230,6 +316,9 @@ impl Scene {
     /// `pywizlight`'s `Wake-up` and `Plantgrowth`, openHAB's `Bed Time` — which
     /// is why the rule strips separators instead of canonicalising them.
     ///
+    /// The three unnamed scenes cannot be found this way; use
+    /// [`from_id`](Scene::from_id).
+    ///
     /// # Errors
     ///
     /// Returns [`Error::UnknownScene`] if no scene matches.
@@ -237,7 +326,10 @@ impl Scene {
         SCENES
             .iter()
             .copied()
-            .find(|scene| normalised(scene.name).eq(normalised(name)))
+            .find(|scene| match scene.name {
+                Some(known) => normalised(known).eq(normalised(name)),
+                None => false,
+            })
             .ok_or_else(|| Error::UnknownScene {
                 message: format!(
                     "no scene is called `{name}`; names are matched ignoring case, spaces \
@@ -263,47 +355,70 @@ impl Scene {
     #[must_use]
     pub const fn id(self) -> SceneId {
         // Every entry in the table is by definition a scene the table names,
-        // which is all `SceneId` validates.
+        // which is what `SceneId` checks.
         SceneId::new_unchecked(self.id)
     }
 
-    /// Its display name.
+    /// Its display name, where anything names it.
+    ///
+    /// `None` for `38`, `39` and `41`, which are real scenes that no
+    /// documentation, no library and not even the WiZ app gives a name to.
+    /// [`Display`](fmt::Display) writes `Scene 38` for those.
     #[must_use]
-    pub const fn name(self) -> &'static str {
+    pub const fn name(self) -> Option<&'static str> {
         self.name
     }
 
-    /// Which parameters it responds to, or `None` where no source says.
-    ///
-    /// The three states are the point: `Some(Adjustable { speed: false, .. })`
-    /// means a source states the scene is static, while `None` means nobody
-    /// documents it. Treating the second as the first would hide a speed
-    /// control that may well work.
+    /// How it behaves, as the WiZ app groups its light modes.
     #[must_use]
-    pub const fn adjustable(self) -> Option<Adjustable> {
+    pub const fn category(self) -> Category {
+        self.category
+    }
+
+    /// Whether the light changes over time.
+    ///
+    /// **Not the same as [`Adjustable::speed`]**: Wake up, Bedtime, Candlelight
+    /// and Alarm all animate without taking a `speed`. Use this to decide
+    /// whether a scene is "moving", and `adjustable().speed` to decide whether
+    /// to offer a rate control.
+    #[must_use]
+    pub const fn animates(self) -> bool {
+        matches!(self.category, Category::Dynamic | Category::Progressive)
+    }
+
+    /// Which parameters it responds to.
+    #[must_use]
+    pub const fn adjustable(self) -> Adjustable {
         self.adjustable
     }
 
-    /// Whether a `speed` may sensibly accompany this scene.
+    /// The colour temperature the bulb reports while this scene runs.
     ///
-    /// True when the scene animates, and also when nothing documents it —
-    /// refusing on the strength of an absent row would be worse than sending a
-    /// parameter the bulb ignores. This is what
-    /// [`PilotBuilder`](super::PilotBuilder) enforces.
+    /// Only the whites report one, and not even all of them — `41` renders
+    /// white and reports nothing, and Dim-to-warm varies its own temperature by
+    /// brightness, which is the whole point of it.
     #[must_use]
-    pub const fn takes_speed(self) -> bool {
-        match self.adjustable {
-            Some(adjustable) => adjustable.speed,
-            None => true,
-        }
+    pub const fn kelvin(self) -> Option<u16> {
+        self.kelvin
     }
 
     /// Whether a device of `class` can play it.
     ///
-    /// Sockets and dimmable fans can play nothing. A tunable-white fan gets the
+    /// **The one part of this module that is not measured.** Only colour
+    /// hardware was available, so the tunable-white and dimmable-white lists
+    /// are inherited: [WiZ's own table][pro] for `1..=33`, `pywizlight` for
+    /// `34..=36` and `40`. The two agree exactly on tunable white and disagree
+    /// on dimmable white, where WiZ also lists Cool white, Golden white and
+    /// Diwali; WiZ is followed here, though its prose contradicts its own
+    /// table. The three unnamed scenes are reported colour-only because that is
+    /// the only class they have been seen on, not because anything says so.
+    ///
+    /// Sockets and dimmable fans play nothing. A tunable-white fan gets the
     /// tunable-white list, since its light is one — `pywizlight` returns
     /// nothing for either kind of fan, which looks like an omission in its
     /// table rather than a fact about the hardware.
+    ///
+    /// [pro]: https://docs.pro.wizconnected.com/#light-modes
     #[must_use]
     pub const fn available_for(self, class: BulbClass) -> bool {
         let bit = match class {
@@ -326,7 +441,10 @@ impl FromStr for Scene {
 
 impl fmt::Display for Scene {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.name)
+        match self.name {
+            Some(name) => f.write_str(name),
+            None => write!(f, "Scene {}", self.id),
+        }
     }
 }
 
@@ -347,13 +465,18 @@ fn normalised(name: &str) -> impl Iterator<Item = char> + '_ {
 mod tests {
     use super::*;
 
-    /// The counts are the shape of the table, and a wrong one is the failure
-    /// mode of a hand-copied table. RGB plays everything; the other two are the
-    /// vendor's columns, plus the four ids the vendor table does not cover.
+    /// The shape of the table, and the id gaps that are the whole story: no
+    /// `37`, and nothing above `41`.
     #[test]
-    fn per_class_counts_match_the_sources() {
-        assert_eq!(Scene::all().len(), 37);
-        assert_eq!(Scene::for_class(BulbClass::Rgb).count(), 37);
+    fn the_table_covers_the_measured_scene_space() {
+        let ids: Vec<u16> = Scene::all().iter().map(|s| s.id().get()).collect();
+        let expected: Vec<u16> = (1..=36).chain(38..=41).collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn per_class_counts() {
+        assert_eq!(Scene::for_class(BulbClass::Rgb).count(), 40);
         assert_eq!(Scene::for_class(BulbClass::Tw).count(), 17);
         assert_eq!(Scene::for_class(BulbClass::Dw).count(), 11);
         // A tunable-white fan is a tunable-white light with a fan attached.
@@ -377,9 +500,9 @@ mod tests {
         );
     }
 
-    /// The vendor's DW column, plus `34` and `35` from `pywizlight`. The three
-    /// ids `pywizlight` leaves out — `13`, `30`, `33` — are the divergence, and
-    /// this test is where it is visible.
+    /// WiZ's DW column, plus `34` and `35` from `pywizlight`. The three ids
+    /// `pywizlight` leaves out — `13`, `30`, `33` — are the divergence, and this
+    /// test is where it is visible.
     #[test]
     fn the_dimmable_white_list_follows_the_vendor_table() {
         let dw: Vec<u16> = Scene::for_class(BulbClass::Dw)
@@ -391,27 +514,29 @@ mod tests {
     #[test]
     fn ids_and_names_round_trip() {
         for scene in Scene::all() {
-            let id = scene.id().get();
-            assert_eq!(Scene::from_id(id), Some(*scene));
-            assert_eq!(Scene::from_name(scene.name()).unwrap(), *scene);
-            assert_eq!(scene.to_string(), scene.name());
+            assert_eq!(Scene::from_id(scene.id().get()), Some(*scene));
+            match scene.name() {
+                Some(name) => {
+                    assert_eq!(Scene::from_name(name).unwrap(), *scene);
+                    assert_eq!(scene.to_string(), name);
+                }
+                // The unnamed three are findable by id only, and label
+                // themselves rather than pretending to a name.
+                None => assert_eq!(scene.to_string(), format!("Scene {}", scene.id().get())),
+            }
         }
     }
 
     #[test]
-    fn names_are_unique_and_the_table_is_sorted() {
-        let mut previous = 0;
+    fn names_are_unique() {
         for scene in Scene::all() {
-            let id = scene.id().get();
-            assert!(id > previous, "the table is out of order at {id}");
-            previous = id;
-        }
-        for scene in Scene::all() {
+            let Some(name) = scene.name() else { continue };
             let clashes = Scene::all()
                 .iter()
-                .filter(|other| normalised(other.name()).eq(normalised(scene.name())))
+                .filter_map(|other| other.name())
+                .filter(|other| normalised(other).eq(normalised(name)))
                 .count();
-            assert_eq!(clashes, 1, "`{}` is not a unique name", scene.name());
+            assert_eq!(clashes, 1, "`{name}` is not a unique name");
         }
     }
 
@@ -431,19 +556,14 @@ mod tests {
         // The spellings the rest of the ecosystem uses have to resolve, since
         // they are what a user reads elsewhere and types at us.
         for (spelling, id) in [
-            // pywizlight
-            ("Wake-up", 9),
-            ("Plantgrowth", 19),
-            ("Pastel colors", 8),
+            ("Wake-up", 9),      // pywizlight
+            ("Plantgrowth", 19), // pywizlight
             ("TV time", 18),
             ("Dim-to-warm", 40),
-            // openHAB
-            ("Bed Time", 10),
-            ("Plant Growth", 19),
-            ("Wakeup", 9),
-            // Adafruit
-            ("Deepdive", 23),
-            ("Wake up", 9),
+            ("Bed Time", 10), // openHAB
+            ("Wakeup", 9),    // openHAB
+            ("Deepdive", 23), // Adafruit
+            ("Pastel Colors", 8),
         ] {
             assert_eq!(
                 Scene::from_name(spelling).unwrap().id().get(),
@@ -463,53 +583,85 @@ mod tests {
     }
 
     #[test]
-    fn unknown_ids_are_none_rather_than_an_error() {
-        // 0 is "no scene" on a read, 37..=39 are unaccounted for, 256 is a user
-        // slot this firmware will not take, 1000 was Rhythm.
-        for id in [0, 37, 38, 39, 41, 100, 256, 265, 1000] {
+    fn ids_that_are_not_scenes_are_none() {
+        // 0 means "no scene" on a read; 37 writes a colour temperature rather
+        // than a scene; 42 and up clamp onto 41; 256 is a user slot; 1000 was
+        // Rhythm, and is refused outright.
+        for id in [0, 37, 42, 100, 248, 256, 265, 1000] {
             assert_eq!(Scene::from_id(id), None, "{id}");
         }
     }
 
+    /// Animating and taking a `speed` are different questions, and the four
+    /// scenes where they differ are the reason both exist.
     #[test]
-    fn the_speed_flag_is_three_state() {
-        // Documented as animating.
+    fn animating_is_not_the_same_as_taking_a_speed() {
+        let animates_without_a_speed = [9, 10, 29, 35];
+        for id in animates_without_a_speed {
+            let scene = Scene::from_id(id).unwrap();
+            assert!(scene.animates(), "{scene} should animate");
+            assert!(!scene.adjustable().speed, "{scene} should take no speed");
+        }
+
         let party = Scene::from_id(4).unwrap();
-        assert_eq!(party.adjustable().map(|a| a.speed), Some(true));
-        assert!(party.takes_speed());
+        assert!(party.animates() && party.adjustable().speed);
 
-        // Documented as static: a `speed` alongside it does nothing.
-        let warm_white = Scene::from_id(11).unwrap();
-        assert_eq!(warm_white.adjustable().map(|a| a.speed), Some(false));
-        assert!(!warm_white.takes_speed());
-
-        // Not documented either way, so `speed` is allowed through.
-        let snowy_sky = Scene::from_id(36).unwrap();
-        assert_eq!(snowy_sky.adjustable(), None);
-        assert!(snowy_sky.takes_speed());
+        // Measured: WiZ's table claims a speed for Cozy, the bulb reports none,
+        // and the light was watched holding still.
+        let cozy = Scene::from_id(6).unwrap();
+        assert_eq!(cozy.category(), Category::Functional);
+        assert!(!cozy.animates() && !cozy.adjustable().speed);
     }
 
-    /// Night light is the only scene the vendor table says ignores `dimming`,
-    /// which is exactly the case that breaks modulating brightness under a
-    /// running scene.
+    /// Wake up, Night light and Alarm swallow `dimming`. Anything modulating
+    /// brightness under a scene has to know.
     #[test]
-    fn night_light_is_the_only_scene_that_ignores_dimming() {
-        let undimmable: Vec<&'static str> = Scene::all()
+    fn the_undimmable_scenes_are_the_measured_three() {
+        let undimmable: Vec<u16> = Scene::all()
             .iter()
-            .filter(|scene| scene.adjustable().is_some_and(|a| !a.dimming))
-            .map(|scene| scene.name())
+            .filter(|scene| !scene.adjustable().dimming)
+            .map(|scene| scene.id().get())
             .collect();
-        assert_eq!(undimmable, ["Night light"]);
+        assert_eq!(undimmable, [9, 14, 35]);
     }
 
     #[test]
-    fn a_scene_serialises_as_its_id_name_and_flags() {
+    fn the_whites_report_the_temperature_they_run_at() {
+        let ladder: Vec<(u16, u16)> = Scene::all()
+            .iter()
+            .filter_map(|scene| Some((scene.id().get(), scene.kelvin()?)))
+            .collect();
+        assert_eq!(
+            ladder,
+            [
+                (11, 2700),
+                (12, 4200),
+                (13, 6500),
+                (34, 4000),
+                (38, 3500),
+                (39, 5000)
+            ]
+        );
+
+        // Every scene reporting a temperature is a white, but not every white
+        // reports one: Dim-to-warm varies its own, and 41 reports nothing.
+        for scene in Scene::all().iter().filter(|s| s.kelvin().is_some()) {
+            assert_eq!(scene.category(), Category::White, "{scene}");
+        }
+        assert_eq!(Scene::from_id(40).unwrap().kelvin(), None);
+        assert_eq!(Scene::from_id(41).unwrap().kelvin(), None);
+    }
+
+    #[test]
+    fn a_scene_serialises_as_its_id_name_and_behaviour() {
         let json = serde_json::to_value(Scene::from_id(23).unwrap()).unwrap();
         assert_eq!(
             json,
             serde_json::json!({
                 "id": 23,
                 "name": "Deep dive",
+                "category": "dynamic",
+                "kelvin": null,
                 "adjustable": {"speed": true, "dimming": true},
             })
         );

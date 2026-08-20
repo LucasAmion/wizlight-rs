@@ -99,19 +99,39 @@ use wizlight::protocol::{BulbClass, Scene};
 // pywizlight, openHAB and WiZ's own docs all resolve.
 let scene = Scene::from_name("deep-dive").expect("Deep dive is a scene");
 assert_eq!(scene.id().get(), 23);
-assert_eq!(scene.name(), "Deep dive");
+assert_eq!(scene.name(), Some("Deep dive"));
 
-// 37 scenes for a colour bulb, 17 for tunable white, 11 for dimmable white.
+// 40 scenes for a colour bulb, 17 for tunable white, 11 for dimmable white.
 assert_eq!(Scene::for_class(BulbClass::Tw).count(), 17);
 
-// `speed` only means something to a scene that animates, and the builder
-// refuses it where it would do nothing.
-assert!(scene.takes_speed());
+// Animating and taking a `speed` are different questions: Wake up ramps over
+// minutes at a rate set in the app, so the builder refuses a `speed` for it.
+assert!(scene.animates() && scene.adjustable().speed);
+let wake_up = Scene::from_id(9).expect("9 is Wake up");
+assert!(wake_up.animates() && !wake_up.adjustable().speed);
 ```
 
-A `SceneId` has to name a scene in that table. The bulb is no help here —
-measured on `ESP25_SHRGB_01` fw 1.38.0, it accepts every id in `1..=248`,
-including the ~200 that name nothing at all, and answers `success`.
+The table is **measured, not transcribed**: every id was written to an
+`ESP25_SHRGB_01` on fw 1.38.0 and read back, and the WiZ app was walked through
+mode by mode to name them. The bulb reports `speed` and `dimming` only where the
+running scene uses them, which makes both directly observable — and corrects
+WiZ's own published table in two places.
+
+A `SceneId` therefore has to be an id the bulb will actually *play*, which is
+narrower than what it accepts. `37` sets a colour temperature instead of a
+scene, and `42`–`248` are silently clamped to `41`; both answer `success`, and
+both are refused here with a message saying what they really do. Custom light
+modes made in the app are addressable as user slots:
+
+```rust
+use wizlight::protocol::SceneId;
+
+let first_custom_mode = SceneId::user_slot(1).expect("there are ten slots");
+assert_eq!(first_custom_mode.get(), 256);
+
+assert!(SceneId::new(37).is_err());   // really sets 2200 K
+assert!(SceneId::new(100).is_err());  // really plays 41
+```
 
 Bulbs are found by broadcasting, and reported as they answer rather than in a
 batch at the end — a discovery run keeps re-broadcasting, so a bulb switched on

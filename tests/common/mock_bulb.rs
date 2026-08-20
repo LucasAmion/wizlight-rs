@@ -227,6 +227,7 @@ pub struct MockBulbBuilder {
     port: u16,
     push_port: u16,
     pilot: Option<Value>,
+    custom_modes: u8,
 }
 
 impl MockBulbBuilder {
@@ -262,6 +263,17 @@ impl MockBulbBuilder {
         self
     }
 
+    /// Saves `count` custom light modes into the user slots, `256` upwards.
+    ///
+    /// Measured: a slot refuses a write until a custom mode has been *saved*
+    /// into it from the WiZ app — playing it is not required — and the slots
+    /// fill in order. A bulb whose owner has never made one refuses all ten,
+    /// which is the default here.
+    pub fn custom_modes(mut self, count: u8) -> Self {
+        self.custom_modes = count;
+        self
+    }
+
     /// Binds the socket and starts serving.
     pub async fn start(self) -> MockBulb {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, self.port))
@@ -287,6 +299,7 @@ impl MockBulbBuilder {
             mac: self.mac.clone(),
             system_config: config(self.personality.system_config, &self.mac),
             kelvin_range: reported_kelvin_range(&model_config, &user_config),
+            custom_modes: self.custom_modes,
             model_config,
             user_config,
             power: self.personality.power.map(|p| config(p, &self.mac)),
@@ -332,6 +345,7 @@ impl MockBulb {
             port: 0,
             push_port: PUSH_PORT,
             pilot: None,
+            custom_modes: 0,
         }
     }
 
@@ -469,6 +483,10 @@ struct Shared {
     /// What `temp` is clamped into; `None` for a personality that reports no
     /// range at all, which is then left to store whatever it was sent.
     kelvin_range: Option<(i64, i64)>,
+    /// How many of the ten user slots hold a custom light mode. Measured: a
+    /// slot only accepts a write once one has been *saved* into it from the
+    /// app, and slots fill in order, so this is a count rather than a set.
+    custom_modes: u8,
     state: Mutex<State>,
 }
 
@@ -611,7 +629,12 @@ impl Shared {
             // match. See the fidelity notes at the top of the module.
             "reboot" | "reset" => reply(latency, error(method, -32600, "Invalid Request")),
             "setPilot" | "setState" => {
-                match apply(&mut state.pilot, request.get("params"), self.kelvin_range) {
+                match apply(
+                    &mut state.pilot,
+                    request.get("params"),
+                    self.kelvin_range,
+                    self.custom_modes,
+                ) {
                     Err((code, message)) => reply(latency, error(method, code, &message)),
                     Ok(()) => {
                         let ack = json!({
@@ -663,10 +686,12 @@ impl Shared {
 ///
 /// `kelvin_range` is the model's own reported range, which is what a `temp`
 /// gets clamped into — a different bound from the one the wire accepts.
+/// `custom_modes` is how many user slots hold a saved custom light mode.
 fn apply(
     pilot: &mut Map<String, Value>,
     params: Option<&Value>,
     kelvin_range: Option<(i64, i64)>,
+    custom_modes: u8,
 ) -> Result<(), (i64, String)> {
     let invalid = || (-32602, "Invalid params".to_owned());
     let params = params.and_then(Value::as_object).ok_or_else(invalid)?;
@@ -703,15 +728,16 @@ fn apply(
                     return Err(invalid());
                 }
             }
-            // Measured: a contiguous 1-248, scanned end to end. Note what that
-            // is *not* — most of those ids name no scene, and the bulb takes
-            // them anyway, so this is a range check and not a scene table. `0`
-            // is refused on a write while being reported on a read, and both
-            // `1000` (Rhythm) and the `256..=265` custom slots are refused,
-            // which is where the ranges inherited from `pywizlight` were wrong.
+            // Measured: 1-248 is accepted, but only 1-41 does anything — the
+            // rest clamps onto 41, which `shape_scene` below imitates. `0` is
+            // refused on a write while being reported on a read. A user slot in
+            // 256-265 is accepted only while it holds a custom mode saved in
+            // the app, which is why an empty harness refuses all ten.
             "sceneId" => {
                 let v = value.as_i64().ok_or_else(invalid)?;
-                if !(1..=248).contains(&v) {
+                let slot = v.checked_sub(255).unwrap_or(0);
+                let populated = (1..=i64::from(custom_modes)).contains(&slot);
+                if !(1..=248).contains(&v) && !populated {
                     return Err(invalid());
                 }
             }
@@ -783,7 +809,75 @@ fn apply(
         };
         pilot.insert(key.clone(), value);
     }
+
+    if params.contains_key("sceneId") {
+        shape_scene(pilot);
+    }
     Ok(())
+}
+
+/// Scenes whose rate can be set. Measured: `getPilot` carries `speed` for these
+/// and for a populated user slot, and for nothing else.
+const PACED_SCENES: &[i64] = &[
+    1, 2, 3, 4, 5, 7, 8, 20, 21, 22, 23, 24, 25, 26, 27, 28, 30, 31, 32, 33, 36,
+];
+/// Wake up, Night light and Alarm. Measured: `dimming` is accepted for these
+/// and discarded, and never appears in `getPilot`.
+const FIXED_SCENES: &[i64] = &[9, 14, 35];
+/// The static whites, and the temperature each reports.
+const SCENE_TEMPS: &[(i64, i64)] = &[
+    (11, 2700),
+    (12, 4200),
+    (13, 6500),
+    (34, 4000),
+    (38, 3500),
+    (39, 5000),
+];
+
+/// Rewrites the pilot into the shape a running scene really reports.
+///
+/// Measured: the bulb answers with the parameters the active scene *uses* and
+/// no others, which is the only way to tell which scenes take a `speed` or a
+/// `dimming`. It accepts the ones that do not apply and drops them, so a client
+/// that trusted the acknowledgement would believe it had set them.
+fn shape_scene(pilot: &mut Map<String, Value>) {
+    let Some(scene) = pilot.get("sceneId").and_then(Value::as_i64) else {
+        return;
+    };
+
+    // Measured: 37 is not a scene. It leaves scene mode and sets 2200 K.
+    if scene == 37 {
+        pilot.insert("sceneId".into(), json!(0));
+        pilot.insert("temp".into(), json!(2200));
+        pilot.remove("speed");
+        return;
+    }
+    // Measured: everything past the last scene clamps onto it, the way an
+    // out-of-cctRange `temp` clamps into the model's range.
+    let scene = if (42..=248).contains(&scene) {
+        41
+    } else {
+        scene
+    };
+    pilot.insert("sceneId".into(), json!(scene));
+
+    if scene == 0 {
+        return;
+    }
+    if PACED_SCENES.contains(&scene) || (256..=265).contains(&scene) {
+        pilot.entry("speed").or_insert(json!(100));
+    } else {
+        pilot.remove("speed");
+    }
+    if FIXED_SCENES.contains(&scene) {
+        pilot.remove("dimming");
+    } else {
+        pilot.entry("dimming").or_insert(json!(100));
+    }
+    match SCENE_TEMPS.iter().find(|(id, _)| *id == scene) {
+        Some((_, kelvin)) => pilot.insert("temp".into(), json!(kelvin)),
+        None => pilot.remove("temp"),
+    };
 }
 
 fn reply(latency: Option<Duration>, body: Value) -> Reaction {

@@ -581,7 +581,7 @@ impl BulbType {
     ///     kelvin_range: Some(KelvinRange::new(2200, 6500)),
     ///     ..BulbData::default()
     /// })?;
-    /// assert_eq!(bulb_type.scenes().count(), 37);
+    /// assert_eq!(bulb_type.scenes().count(), 40);
     /// # Ok::<(), wizlight::Error>(())
     /// ```
     pub fn scenes(&self) -> impl Iterator<Item = Scene> {

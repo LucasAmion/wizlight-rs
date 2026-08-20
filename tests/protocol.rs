@@ -451,21 +451,24 @@ async fn a_colour_bulb_that_reports_no_kelvin_range_is_an_error() {
 #[tokio::test]
 async fn the_scene_list_follows_the_bulb_s_class() {
     let cases = [
-        (Personality::rgb(), 37),
-        (Personality::tunable_white(), 17),
-        (Personality::dimmable_white(), 11),
+        (Personality::rgb(), BulbClass::Rgb, 40),
+        (Personality::tunable_white(), BulbClass::Tw, 17),
+        (Personality::dimmable_white(), BulbClass::Dw, 11),
         // Nothing to run a light mode on.
-        (Personality::socket(), 0),
-        (Personality::fan(), 0),
+        (Personality::socket(), BulbClass::Socket, 0),
+        (Personality::fan(), BulbClass::FanDim, 0),
     ];
 
-    for (personality, expected) in cases {
+    for (personality, class, expected) in cases {
         let name = personality.module_name;
         let bulb = MockBulb::builder().personality(personality).start().await;
         let scenes = connect(&bulb).await.scenes().await.expect("scenes");
         assert_eq!(scenes.len(), expected, "{name}");
-        // Whatever the class, a listed scene has to be one the bulb can play.
-        assert!(scenes.iter().all(|scene| scene.name().len() > 1), "{name}");
+        // Whatever the class, a listed scene has to be one it can play.
+        assert!(
+            scenes.iter().all(|scene| scene.available_for(class)),
+            "{name}"
+        );
     }
 }
 
