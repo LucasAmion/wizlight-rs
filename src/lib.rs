@@ -17,9 +17,9 @@ pub use discovery::{
 };
 pub use error::{Error, Result};
 pub use protocol::{
-    Adjustable, BulbClass, BulbData, BulbType, Category, Channel, Derivation, DeviceError, Devices,
-    Dimming, Features, Heads, Kelvin, KelvinRange, ModelConfig, ModuleName, Pilot, PilotBuilder,
-    PilotParams, Power, Ratio, Request, Response, Scene, SceneId, Speed, Success, SystemConfig,
-    UserConfig,
+    Adjustable, BulbClass, BulbData, BulbType, CW_MAX, Category, Channel, ColourStrategy,
+    Derivation, DeviceError, Devices, Dimming, Features, Heads, Hs, Kelvin, KelvinRange,
+    ModelConfig, ModuleName, Pilot, PilotBuilder, PilotParams, Power, Ratio, Request, Response,
+    Rgbcw, Scene, SceneId, Speed, Success, SystemConfig, UserConfig, WhiteChannel,
 };
 pub use transport::RetryPolicy;

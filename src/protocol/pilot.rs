@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::colour::{Hs, Rgbcw};
 use super::scene::Scene;
 use super::types::{Channel, Devices, Dimming, Kelvin, Ratio, SceneId, Speed};
 use crate::error::{Error, Result};
@@ -180,10 +181,11 @@ impl PilotBuilder {
 
     /// Sets `r`/`g`/`b`.
     ///
-    /// Does **not** run RGB→RGB+CW conversion; that is a separate concern.
-    /// Send raw channels, or add cold/warm white with
+    /// Does **not** run RGB→RGB+CW conversion: this is the raw channel, and
+    /// whatever `c`/`w` the bulb was last given stays as it is unless
     /// [`cold_white`](PilotBuilder::cold_white) /
-    /// [`warm_white`](PilotBuilder::warm_white).
+    /// [`warm_white`](PilotBuilder::warm_white) is set too. For a colour mixed
+    /// across all five emitters, use [`colour`](PilotBuilder::colour).
     ///
     /// Conflicts with [`temp`](PilotBuilder::temp) and
     /// [`scene`](PilotBuilder::scene).
@@ -213,6 +215,44 @@ impl PilotBuilder {
     #[must_use]
     pub fn rgbww(self, r: Channel, g: Channel, b: Channel, c: Channel, w: Channel) -> Self {
         self.rgb(r, g, b).cold_white(c).warm_white(w)
+    }
+
+    /// Sets all five channels from a converted colour.
+    ///
+    /// [`ColourStrategy`](super::ColourStrategy) decides how the colour is spread across the
+    /// emitters; this puts the result on the wire. All five are sent, zeroes
+    /// included, so the request fully determines the light — sending only some
+    /// of them leaves the others wherever the previous request left them.
+    ///
+    /// ```
+    /// use wizlight::protocol::{ColourStrategy, Dimming, PilotBuilder, WhiteChannel};
+    ///
+    /// let peach = ColourStrategy::Trapezoid(WhiteChannel::Cold).apply_rgb((255, 200, 170));
+    /// let request = PilotBuilder::new()
+    ///     .colour(peach)
+    ///     .dimming(Dimming::new(60)?)
+    ///     .set_pilot()?;
+    /// assert_eq!(
+    ///     serde_json::to_value(&request)?,
+    ///     serde_json::json!({
+    ///         "method": "setPilot",
+    ///         "params": {"r": 149, "g": 52, "b": 0, "c": 128, "w": 0, "dimming": 60},
+    ///     }),
+    /// );
+    /// # Ok::<(), wizlight::Error>(())
+    /// ```
+    ///
+    /// Conflicts with [`temp`](PilotBuilder::temp) and
+    /// [`scene`](PilotBuilder::scene).
+    #[must_use]
+    pub fn colour(self, colour: Rgbcw) -> Self {
+        self.rgbww(
+            Channel::new(colour.r),
+            Channel::new(colour.g),
+            Channel::new(colour.b),
+            Channel::new(colour.c),
+            Channel::new(colour.w),
+        )
     }
 
     /// Sets cold white (`c`), with or without an RGB triple.
@@ -551,6 +591,35 @@ impl Pilot {
     pub fn rgbww(&self) -> Option<(u8, u8, u8, u8, u8)> {
         Some((self.r?, self.g?, self.b?, self.c?, self.w?))
     }
+
+    /// The reported channels as a colour, whichever of them the bulb sent.
+    ///
+    /// A missing white counts as unlit, since the bulb only reports the
+    /// channels the active mode uses. `None` if the bulb is not in colour mode
+    /// at all, which is when `r`/`g`/`b` are absent.
+    #[must_use]
+    pub fn colour(&self) -> Option<Rgbcw> {
+        Some(Rgbcw {
+            r: self.r?,
+            g: self.g?,
+            b: self.b?,
+            c: self.c.unwrap_or(0),
+            w: self.w.unwrap_or(0),
+        })
+    }
+
+    /// The hue and saturation the reported channels amount to.
+    ///
+    /// Read through [`Rgbcw::to_hs`], so it inverts
+    /// [`ColourStrategy::Trapezoid`](super::ColourStrategy::Trapezoid) and
+    /// inherits its approximation. A bulb driven with
+    /// [`ColourStrategy::Rgb`](super::ColourStrategy::Rgb) will not read back
+    /// as the hue and saturation it was given: the raw strategy desaturates in
+    /// colour space, and this does not know that.
+    #[must_use]
+    pub fn hs(&self) -> Option<Hs> {
+        Some(self.colour()?.to_hs())
+    }
 }
 
 /// `{"success": true}` — the usual write acknowledgement.
@@ -606,6 +675,58 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    /// A converted colour is the channel mode, so it clashes with the other
+    /// two exactly as a raw triple does — and sends all five channels, which
+    /// is what makes the request describe the whole light rather than a change
+    /// to part of it.
+    #[test]
+    fn a_converted_colour_is_the_channel_mode() {
+        use super::super::colour::{ColourStrategy, WhiteChannel};
+
+        let peach = ColourStrategy::Trapezoid(WhiteChannel::Warm).apply_rgb((255, 200, 170));
+        let request = PilotBuilder::new()
+            .colour(peach)
+            .state(true)
+            .set_pilot()
+            .expect("colour alone is a valid request");
+        assert_eq!(
+            wire(&request),
+            json!({
+                "method": "setPilot",
+                "params": {"state": true, "r": 149, "g": 52, "b": 0, "c": 0, "w": 128},
+            }),
+        );
+
+        let err = PilotBuilder::new()
+            .temp(Kelvin::new(4000).unwrap())
+            .colour(peach)
+            .set_pilot()
+            .unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+    }
+
+    /// What a bulb reports comes back as a colour, whichever channels it chose
+    /// to include.
+    #[test]
+    fn a_reported_colour_reads_back() {
+        let pilot = Pilot {
+            r: Some(255),
+            g: Some(0),
+            b: Some(0),
+            c: Some(64),
+            ..Pilot::default()
+        };
+        let colour = pilot.colour().expect("r/g/b are present");
+        // The absent warm white is unlit, not unknown: the bulb reports only
+        // what the active mode uses.
+        assert_eq!((colour.c, colour.w), (64, 0));
+        assert_eq!(pilot.hs().expect("r/g/b are present").saturation(), 75.0);
+
+        // No colour mode, no colour.
+        assert_eq!(Pilot::default().colour(), None);
+        assert_eq!(Pilot::default().hs(), None);
     }
 
     #[test]

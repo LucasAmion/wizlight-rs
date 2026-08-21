@@ -27,6 +27,7 @@
 //! protocol. A result type enforcing the write bound would turn that into a
 //! parse failure, and a firmware update into a broken client.
 
+mod colour;
 mod config;
 mod model;
 mod pilot;
@@ -35,6 +36,7 @@ mod response;
 mod scene;
 mod types;
 
+pub use colour::{CW_MAX, ColourStrategy, Hs, Rgbcw, WhiteChannel};
 pub use config::{ModelConfig, Power, SystemConfig, UserConfig};
 pub use model::{
     BulbClass, BulbData, BulbType, Derivation, Features, Heads, KelvinRange, ModuleName,
