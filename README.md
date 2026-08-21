@@ -28,7 +28,9 @@ real-time control, and it is the protocol layer underneath
 - ~~`getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
   requests and responses~~ — done
 - ~~Bulb model parsing: capabilities, scene support and Kelvin range~~ — done
-- RGB ↔ RGB+CW conversion, cross-checked against `pywizlight`
+- ~~RGB ↔ RGB+CW conversion, cross-checked against `pywizlight`~~ — done, as a
+  strategy the caller picks; which one looks better is settled on hardware, not
+  here
 - A rate-limited streaming path for driving bulbs from live audio or video
 - `syncPilot` push updates
 
