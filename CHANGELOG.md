@@ -187,6 +187,12 @@ is why both strategies exist rather than only the better one.
   recovered from a vector the forward conversion had rescaled to fit the gamut
   and nothing undoes that. Hue holds to 0.5° while saturation is at least 25,
   and falls apart below 5, where almost no colour is left to read.
+- **The port is deterministic across platforms where `pywizlight` is not.**
+  The three primaries are frozen constants rather than `cos`/`sin` calls,
+  because the last bit of `cos(2π/3)` is not the same on macOS as on Linux —
+  CI caught it. `pywizlight` inherits whatever its platform's `libm` says; this
+  does not, which is what lets the `rgb2rgbcw` golden test demand an exact byte
+  everywhere instead of allowing a tolerance.
 - Two rounding quirks are inherited on purpose. A hue exactly between two
   primaries yields 254 rather than 255 on one channel, and the conversion
   truncates where it might have rounded. Both are what `pywizlight` does, so

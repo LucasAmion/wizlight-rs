@@ -35,10 +35,17 @@ pub const CW_MAX: u8 = 128;
 
 /// The primaries, 120° apart, as unit vectors in the hue plane.
 ///
-/// Spelled out rather than computed because `f64::cos` is not `const`. They
-/// are the exact `f64`s `cos`/`sin` produce for 0, 2π/3 and 4π/3 — including
-/// the last-bit error that makes two of them not quite ±0.5 — so that the port
-/// starts from the same numbers as the original. A test below checks that.
+/// Spelled out rather than computed, and that is worth more than the `const`
+/// it buys. These are the `f64`s CPython's `cos`/`sin` produced for 0, 2π/3
+/// and 4π/3 on the machine the golden table was recorded on, last-bit error
+/// and all — so the port starts from the numbers the original started from.
+///
+/// Computing them here instead would hand the starting point to whichever
+/// `libm` the build lands on, and **they do not agree**: the last bit of
+/// `cos(2π/3)` differs between platforms, which CI caught. `pywizlight`
+/// inherits that variation. Freezing the constants means this crate does not,
+/// and it is why the `rgb2rgbcw` golden test can demand an exact byte on every
+/// platform rather than settling for a tolerance.
 const BASIS: [Vec2; 3] = [
     (1.0, 0.0),
     (-0.499_999_999_999_999_83, 0.866_025_403_784_438_7),
@@ -493,15 +500,32 @@ impl Rgbcw {
 mod tests {
     use super::*;
 
-    /// The basis is written out as literals, so it has to be checked against
-    /// what produced them.
+    /// The basis is written out as literals, so it is checked against what
+    /// computes them — but only to within a bit, because **the platforms
+    /// disagree in that bit**. `cos(2π/3)` is not the same `f64` on macOS as
+    /// on Linux, and CI failed on exactly that before this test was loosened.
+    ///
+    /// Demanding equality here would mean demanding it of every `libm` the
+    /// crate is ever built against, which is not a promise any of them makes.
+    /// The constants stay frozen precisely so that the *conversion* is
+    /// identical everywhere even though `cos` is not; this checks they are
+    /// still the right constants, not that the local `cos` agrees to the bit.
     #[test]
     fn the_basis_is_the_one_the_original_computes() {
+        // One ULP either side, at this magnitude.
+        let close = |a: f64, b: f64| (a - b).abs() <= f64::EPSILON;
         let angle = TAU / 3.0;
         for (index, radians) in [0.0, angle, angle * 2.0].into_iter().enumerate() {
-            assert_eq!(BASIS[index], (radians.cos(), radians.sin()), "{index}");
+            let (cos, sin) = (radians.cos(), radians.sin());
+            assert!(
+                close(BASIS[index].0, cos) && close(BASIS[index].1, sin),
+                "basis {index} is {:?}, this platform computes {:?}",
+                BASIS[index],
+                (cos, sin),
+            );
         }
-        assert_eq!(MAX_ANGLE, (TAU / 3.0 - EPSILON).cos());
+        let computed = (TAU / 3.0 - EPSILON).cos();
+        assert!(close(MAX_ANGLE, computed), "{MAX_ANGLE} vs {computed}");
     }
 
     /// [`length`]'s threshold is faithful to the original and **cannot fire
