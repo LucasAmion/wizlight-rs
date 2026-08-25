@@ -9,11 +9,11 @@ real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
 > **Status: early development, and the published versions are alphas.** The
-> request/response transport, discovery and typed pilot/config methods are in;
-> the CLI now has a parser and global flags, but the actual protocol-backed
-> commands are still intentionally stubbed and return a non-zero error until the
-> rest of the command surface is wired up. The API will change without warning
-> until `0.1.0`.
+> request/response transport, discovery and typed pilot/config methods are in,
+> and so is the everyday CLI surface — `discover`, `status`, `info`, `on`,
+> `off`, `toggle`, `set` and `scenes`. `watch` and `bench` wait on the push
+> listener and the streaming write path, and are still stubbed. The API will
+> change without warning until `0.1.0`.
 >
 > Alphas are published to keep the release path exercised rather than to be
 > depended on, so **every version below has to be spelled out in full**. Cargo
@@ -23,8 +23,9 @@ real-time control, and it is the protocol layer underneath
 
 ## Planned scope
 
-- ~~Discovery by UDP broadcast~~ — done, though the CLI does not yet detect the
-  broadcast address from the local interfaces
+- ~~Discovery by UDP broadcast~~ — done, though the CLI does not yet derive the
+  broadcast address from the local interfaces; `--broadcast` names it, and the
+  all-subnets default reaches everything on the attached network
 - ~~`getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
   requests and responses~~ — done
 - ~~Bulb model parsing: capabilities, scene support and Kelvin range~~ — done
@@ -164,32 +165,71 @@ than 20 ms — so an unreachable bulb fails in under two seconds. See
 [`RetryPolicy`](https://docs.rs/wizlight/latest/wizlight/struct.RetryPolicy.html)
 to change that.
 
-## CLI scaffold
+## CLI
 
-The binary installs, parses the command tree and renders output. **No command
-does anything to a bulb yet** — every one of them exits 1 with a message saying
-so. It ships in the alphas so that packaging and installation are exercised
-before the commands land.
+```console
+$ wizlight discover
+9877d523a4da  192.168.0.8  ESP25_SHRGB_01  1.38.0
+9877d5230f0a  192.168.0.7  ESP25_SHRGB_01  1.38.0
 
-What does work is the plumbing around them:
+$ wizlight status 9877d5230f0a
+on  scene Warm white (11)  2700 K  100%  -49 dBm
 
-- Results go to stdout, everything else to stderr — logs, diagnostics and
+$ wizlight on 9877d5230f0a --rgb 255,80,0 --brightness 60
+$ wizlight on --all --scene "deep dive" --speed 120
+$ wizlight off --all
+```
+
+**Address a bulb by MAC, not by IP.** A `<target>` accepts either, but DHCP
+moves a bulb's address without warning and the MAC is the only stable identity
+the protocol exposes. A MAC costs one short scan to resolve, and it stops as
+soon as that bulb answers.
+
+| Command | What it does |
+| --- | --- |
+| `discover` | Every bulb that answers, with MAC, address, model and firmware |
+| `status <target>` | What the bulb says it is doing |
+| `info <target>` | Model, firmware, class, Kelvin range and what it can do |
+| `scenes <target>` | Only the scenes that bulb's class actually plays |
+| `on` / `off` / `toggle` | `on` also takes `--rgb`, `--hsv`, `--kelvin`, `--scene`, `--speed`, `--brightness` |
+| `set <target>` | The same options, sent as `setState`. It does **not** leave a bulb that was off alone: measured on `ESP25_SHRGB_01` fw 1.38.0, `setState` turns it on exactly as `setPilot` does |
+| `watch` / `bench` | Not yet — they wait on the push listener and the streaming write path |
+
+`--all` replaces the target on any of them and fans out to every bulb a scan
+finds, concurrently. One bulb failing does not abort the rest, and does not let
+the run exit `0` either.
+
+The ways of naming a colour are mutually exclusive, and clap rejects two of them
+before anything is sent. `--scene` takes an id or a name, matched ignoring case
+and punctuation. Asking a bulb for something it has no hardware for — colour on
+a dimmable white — fails with a message naming its class, because the bulb will
+not refuse it: it answers `success` and does nothing.
+
+### Output
+
+- **stdout is results, stderr is everything else** — logs, diagnostics and
   errors, including the JSON ones. Redirect stdout and you get data or nothing.
-- `--json` renders errors as JSON too, so a script never has to parse prose.
-  The shape is not stable yet; it settles when the commands do.
+- **`--json` on every command**, with one envelope for both outcomes:
+
+  ```json
+  {"ok": true,  "command": "status", "target": "9877d5230f0a", "result": {"state": true, "dimming": 100}}
+  {"ok": false, "command": "status", "target": "9877d5230f0a", "error": "no reply from …"}
+  ```
+
+  `result` is shaped by the command; under `--all` it is a list of
+  `{"target", "ok", "result"}` or `{"target", "ok", "error"}`, one per bulb.
+- **Exit codes**: `0` success, `1` failed, `2` usage, `3` nothing answered to
+  that target, `4` a bulb was there and stopped answering. The last two are
+  separate because they call for different reactions — re-scan, or retry.
 - `-v` raises the log level (`-v` info, `-vv` debug, `-vvv` trace) and
   `RUST_LOG` overrides it entirely.
 - Colour is dropped when stderr is not a terminal, when `NO_COLOR` is set to
   anything non-empty, and under `--json`.
-- Exit codes are 0 for success, 2 for a usage error, and 1 otherwise. The
-  distinct codes for *not found* and *timed out* arrive with the commands that
-  can produce them.
-- `-V`/`--version` reports the crate version, and `-h` and `--help` print the
-  same thing.
 
-`--timeout` and `--broadcast` are parsed and logged but nothing consumes them
-yet; they are listed here because they are part of the settled surface, not
-because they currently do anything.
+`--timeout` is how long to wait for each reply before retrying, and `--wait`
+is how long a scan lasts. The CLI is deliberately more patient than the
+library's default: a bulb at the far end of a flat has a round trip past a
+second.
 
 Installing it needs the version spelled out. `cargo install` resolves `*`, and
 `*` does not match a prerelease, so the bare form fails outright rather than
@@ -203,18 +243,6 @@ $ cargo install wizlight --version 0.1.0-alpha.1
 ```
 
 Plain `cargo install wizlight` starts working when `0.1.0` ships.
-
-The shape it is being built towards:
-
-```console
-$ wizlight discover
-$ wizlight status 192.168.1.42
-$ wizlight on 192.168.1.42 --rgb 255,80,0 --brightness 60
-$ wizlight watch --all
-```
-
-Every command will take `--json` for scripting, and `<target>` will accept
-either an IP address or a MAC (resolved through discovery).
 
 ## Compatibility
 
