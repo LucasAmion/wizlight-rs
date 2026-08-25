@@ -4,26 +4,52 @@
 //! parsing and output rendering can be exercised from the test suite.
 //! `src/main.rs` is a wrapper around [`run`].
 //!
-//! This is the CLI scaffold: the command tree, global flags and renderers are
-//! in place, while the bulb operations themselves are still stubbed. Every
-//! command therefore fails, and says so in whichever format was asked for.
-//!
 //! # Streams
 //!
 //! Results go to stdout and everything else goes to stderr — diagnostics, log
 //! output and errors, including the JSON ones. A script can redirect stdout
 //! and parse it without having to strip anything out of the way first.
+//!
+//! # The `--json` contract
+//!
+//! Every command emits one JSON object, and the envelope is the same whether
+//! the command worked or not:
+//!
+//! ```json
+//! {"ok": true,  "command": "discover", "target": null,        "result": []}
+//! {"ok": false, "command": "status",   "target": "192.168.0.7", "error": "…"}
+//! ```
+//!
+//! `ok` says whether the command did what was asked. `command` and `target`
+//! echo the invocation, so a fan-out over many bulbs can be told apart by the
+//! reader. `result` is present on success and shaped by the command; `error`
+//! is present on failure and is the same message the human rendering shows.
+//! The envelope is a stable contract; the inside of `result` grows as commands
+//! learn to say more.
+//!
+//! # Exit codes
+//!
+//! `0` success, `2` for a usage error — clap's own, before anything runs —
+//! and `1` for everything else. The distinct codes for *not found* and *timed
+//! out* wait for the commands that can produce them: discovery reports what
+//! answered, and nothing here yet fails at a bulb that was supposed to be
+//! listening.
 
+use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use serde_json::{Value, json};
 
+mod discover;
 mod output;
 
 pub use output::{
     HumanRenderer, JsonRenderer, OutputRenderer, colour_on_stderr, colour_on_stdout, render_json,
 };
+
+use crate::{PORT, RetryPolicy};
 
 /// Global CLI flags shared across all commands.
 ///
@@ -41,13 +67,33 @@ pub struct Cli {
     #[arg(long, short = 'j', global = true, action = ArgAction::SetTrue)]
     pub json: bool,
 
-    /// Per-request timeout in seconds.
-    #[arg(long, global = true, default_value = "2", value_name = "SECONDS")]
-    pub timeout: u64,
+    /// How long to wait for each reply before trying again, in seconds.
+    #[arg(
+        long,
+        global = true,
+        default_value = "2",
+        value_name = "SECONDS",
+        value_parser = seconds
+    )]
+    pub timeout: Duration,
 
-    /// Override the broadcast address to use during discovery.
-    #[arg(long, global = true, value_name = "ADDR")]
-    pub broadcast: Option<String>,
+    /// How long a discovery scan lasts, in seconds.
+    #[arg(
+        long,
+        global = true,
+        default_value = "5",
+        value_name = "SECONDS",
+        value_parser = seconds
+    )]
+    pub wait: Duration,
+
+    /// Override the address discovery broadcasts to. Repeatable.
+    ///
+    /// The default reaches every bulb on the directly attached network. A
+    /// host on several networks needs one of these per subnet, because the
+    /// kernel routes the all-subnets address out of one interface only.
+    #[arg(long, global = true, value_name = "ADDR", value_parser = address)]
+    pub broadcast: Vec<SocketAddr>,
 
     /// Increase logging verbosity. Repeat the flag to add more detail.
     #[arg(long, short = 'v', global = true, action = ArgAction::Count)]
@@ -56,6 +102,50 @@ pub struct Cli {
     /// The selected subcommand.
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// The retry policy the globals ask for.
+    ///
+    /// Deliberately more patient than [`RetryPolicy::default`], whose 500 ms is
+    /// measured against a bulb at close range. The same bulb further away has
+    /// a round trip past a second, and a CLI that gives up on it is worse than
+    /// one that takes a moment: the default here is three attempts of
+    /// `--timeout` each.
+    #[must_use]
+    pub fn policy(&self) -> RetryPolicy {
+        RetryPolicy {
+            attempt_timeout: self.timeout,
+            ..RetryPolicy::default()
+        }
+    }
+}
+
+/// Parses a number of seconds, which may be fractional.
+///
+/// `try_from_secs_f64` rejects negatives, NaN and anything that overflows a
+/// `Duration`, so `--timeout -1` is a usage error rather than an instant
+/// failure much later.
+fn seconds(input: &str) -> Result<Duration, String> {
+    let secs: f64 = input
+        .parse()
+        .map_err(|_| format!("`{input}` is not a number of seconds"))?;
+    Duration::try_from_secs_f64(secs).map_err(|err| format!("`{input}`: {err}"))
+}
+
+/// Parses an address, supplying the WiZ [`PORT`] when none was given.
+///
+/// Bulbs are always on 38899, so making it optional is the difference between
+/// `--broadcast 192.168.0.255` and remembering a constant. The port is still
+/// accepted, which is how a test points the CLI at a bulb on a loopback port.
+fn address(input: &str) -> Result<SocketAddr, String> {
+    if let Ok(addr) = input.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    input
+        .parse::<IpAddr>()
+        .map(|ip| SocketAddr::new(ip, PORT))
+        .map_err(|_| format!("`{input}` is not an address"))
 }
 
 /// The bulb a command acts on.
@@ -68,8 +158,8 @@ pub struct Target {
 /// Supported commands.
 ///
 /// The tree is complete ahead of the implementations so that the surface, the
-/// help text and the JSON contract can settle before commands start landing
-/// against them.
+/// help text and the JSON contract can settle before commands land against
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
     /// Discover bulbs on the current LAN.
@@ -130,17 +220,62 @@ impl Command {
     }
 }
 
+/// What a command produced.
+///
+/// Both renderings are built together rather than one being derived from the
+/// other, because neither can be: the JSON is a contract and the human form is
+/// a layout. Building both where the data is still typed is what stops a
+/// command from growing a field in one format and not the other.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outcome {
+    result: Value,
+    human: String,
+}
+
+impl Outcome {
+    /// An outcome carrying its `result` payload and its human rendering.
+    #[must_use]
+    pub fn new(result: Value, human: impl Into<String>) -> Self {
+        Self {
+            result,
+            human: human.into(),
+        }
+    }
+
+    /// Renders the outcome in the format the caller asked for.
+    #[must_use]
+    pub fn render(&self, command: &Command, json: bool) -> String {
+        let payload = if json {
+            json!({
+                "ok": true,
+                "command": command.name(),
+                "target": command.target(),
+                "result": self.result,
+            })
+        } else {
+            Value::String(self.human.clone())
+        };
+        renderer(json).render(&payload)
+    }
+}
+
 /// Runs the selected command.
 ///
 /// # Errors
 ///
-/// Currently always: every command is still stubbed. Once they land this
-/// returns whatever the operation failed with.
-pub fn run_command(command: &Command) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "`{}` is not implemented yet; this is the CLI scaffold",
-        command.name()
-    )
+/// Whatever the command failed with. Commands that are still stubbed fail
+/// saying so.
+pub async fn run_command(cli: &Cli) -> anyhow::Result<Outcome> {
+    let policy = cli.policy();
+    match &cli.command {
+        Command::Discover => {
+            discover::run(&discover::discovery(&cli.broadcast, &policy), cli.wait).await
+        }
+        other => anyhow::bail!(
+            "`{}` is not implemented yet; this is the CLI scaffold",
+            other.name()
+        ),
+    }
 }
 
 /// Renders a failure in the format the caller asked for.
@@ -199,30 +334,41 @@ fn init_logging(verbose: u8, json: bool) {
 ///
 /// Returns the process exit code rather than a `Result`, so that the error is
 /// rendered in the requested format instead of by `anyhow`'s `Debug` output.
-///
-/// Exit codes are currently only success and failure. The distinct codes for
-/// not-found and timeout wait for commands that can actually produce them; a
-/// usage error is clap's own exit, before this is reached.
 #[must_use]
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     init_logging(cli.verbose, cli.json);
 
-    // The globals are carried but not yet consumed: the commands that will
-    // honour them do not exist. Logging them is how `--timeout` and
-    // `--broadcast` can be checked in the meantime, and it gives `-v`
-    // something to show while the library itself is uninstrumented.
     tracing::debug!(
         command = cli.command.name(),
         target = cli.command.target(),
-        timeout_secs = cli.timeout,
-        broadcast = cli.broadcast.as_deref(),
+        timeout = ?cli.timeout,
+        wait = ?cli.wait,
+        broadcast = ?cli.broadcast,
         json = cli.json,
         "parsed invocation"
     );
 
-    match run_command(&cli.command) {
-        Ok(()) => ExitCode::SUCCESS,
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!(
+                "{}",
+                render_failure(
+                    Some(&cli.command),
+                    &format!("could not start the async runtime: {err}"),
+                    cli.json
+                )
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match runtime.block_on(run_command(&cli)) {
+        Ok(outcome) => {
+            println!("{}", outcome.render(&cli.command, cli.json));
+            ExitCode::SUCCESS
+        }
         Err(err) => {
             eprintln!(
                 "{}",
