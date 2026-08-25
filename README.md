@@ -28,9 +28,16 @@ real-time control, and it is the protocol layer underneath
 - ~~`getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
   requests and responses~~ — done
 - ~~Bulb model parsing: capabilities, scene support and Kelvin range~~ — done
-- RGB ↔ RGB+CW conversion, cross-checked against `pywizlight`
 - A rate-limited streaming path for driving bulbs from live audio or video
 - `syncPilot` push updates
+
+**Not planned: RGB ↔ RGB+CW conversion.** A WiZ RGB bulb has five emitters, and
+deciding how to spread a colour across them is a judgement call, not a protocol
+detail. This crate lets you send `r`/`g`/`b`, or all five channels, and holds no
+opinion about which — see [`PilotBuilder`]. `pywizlight`'s "trapezoid" was ported
+and measured against raw RGB on hardware before being dropped: it renders a
+near-white better, ties or loses elsewhere, and cannot reach some colours at all.
+Anything that good is worth an application deciding for itself.
 
 ## Library usage
 
