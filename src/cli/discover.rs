@@ -1,12 +1,11 @@
 //! `wizlight discover` — who is out there.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::Outcome;
-use crate::{Discovered, Discovery, RetryPolicy, SystemConfig};
+use crate::{Discovered, Discovery, SystemConfig};
 
 /// Broadcasts for `wait` and reports everything that answered.
 ///
@@ -28,22 +27,6 @@ pub async fn run(discovery: &Discovery, wait: Duration) -> anyhow::Result<Outcom
     let found = discovery.collect(wait).await?;
     tracing::info!(bulbs = found.len(), ?wait, "scan finished");
     Ok(Outcome::new(payload(&found), listing(&found, wait)))
-}
-
-/// Builds the discovery run a scan uses.
-///
-/// `broadcast` is the `--broadcast` override: any address given there replaces
-/// the all-subnets default, whether it is a subnet's own broadcast address on
-/// a multi-homed host or a single bulb known to be there.
-pub fn discovery(broadcast: &[SocketAddr], policy: &RetryPolicy) -> Discovery {
-    let discovery = Discovery::new()
-        // Model and firmware for the listing. Costs a round trip per bulb,
-        // and a bulb that does not answer it is still reported.
-        .system_config(true)
-        .policy(policy.clone());
-    broadcast
-        .iter()
-        .fold(discovery, |discovery, addr| discovery.target(*addr))
 }
 
 /// The `--json` payload: one object per bulb, in the order they answered.

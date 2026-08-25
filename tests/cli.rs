@@ -47,7 +47,8 @@ fn scan_at(broadcast: &str, wait: &str, args: &[&str], env: &[(&str, &str)]) -> 
 
 fn target(name: &str) -> Target {
     Target {
-        target: name.to_owned(),
+        target: Some(name.parse().expect("a valid target")),
+        all: false,
     }
 }
 
@@ -177,22 +178,17 @@ fn a_json_failure_carries_the_command_and_target() {
 }
 
 #[tokio::test]
-async fn every_command_but_discover_is_still_stubbed_and_names_itself() {
+async fn the_push_commands_are_still_stubbed_and_name_themselves() {
+    // `watch` and `bench` wait on the library's push listener and its
+    // rate-limited write path; neither exists yet.
     let stubbed = [
-        Command::Status(target("x")),
-        Command::Info(target("x")),
-        Command::On(target("x")),
-        Command::Off(target("x")),
-        Command::Toggle(target("x")),
-        Command::Set(target("x")),
-        Command::Scenes(target("x")),
-        Command::Watch(target("x")),
-        Command::Bench(target("x")),
+        Command::Watch(target("9877d5230f0a")),
+        Command::Bench(target("9877d5230f0a")),
     ];
 
     for command in stubbed {
         let name = command.name();
-        let cli = Cli::try_parse_from(["wizlight", name, "x"]).expect("parses");
+        let cli = Cli::try_parse_from(["wizlight", name, "9877d5230f0a"]).expect("parses");
         assert_eq!(cli.command, command);
 
         let err = run_command(&cli).await.expect_err("still stubbed");
@@ -202,10 +198,27 @@ async fn every_command_but_discover_is_still_stubbed_and_names_itself() {
     }
 }
 
-#[test]
-fn a_stubbed_command_exits_non_zero() {
-    let output = wizlight(&["status", "192.168.0.5"]);
-    assert_eq!(output.status.code(), Some(1));
+/// A bulb that is there and will not answer, so a command times out rather
+/// than failing to find anything. A closed port would be quicker, but Windows
+/// turns the resulting ICMP into a socket error and the failure would no
+/// longer be the one being tested.
+async fn deaf_bulb() -> MockBulb {
+    let bulb = MockBulb::start().await;
+    bulb.drop_next(usize::MAX);
+    bulb
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failure_goes_to_stderr_and_stdout_stays_empty() {
+    let bulb = deaf_bulb().await;
+    let addr = bulb.addr().to_string();
+
+    let output =
+        tokio::task::spawn_blocking(move || wizlight(&["--timeout", "0.05", "status", &addr]))
+            .await
+            .expect("the command ran");
+
+    assert_eq!(output.status.code(), Some(4), "a timeout has its own code");
     assert!(
         output.stdout.is_empty(),
         "results go to stdout, errors do not"
@@ -213,13 +226,22 @@ fn a_stubbed_command_exits_non_zero() {
 
     let stderr = String::from_utf8(output.stderr).expect("utf-8");
     assert!(stderr.starts_with("error: "), "{stderr}");
-    assert!(stderr.contains("status"), "{stderr}");
+    assert!(stderr.contains("getPilot"), "{stderr}");
 }
 
-#[test]
-fn a_json_failure_goes_to_stderr_as_json_and_only_once() {
-    let output = wizlight(&["--json", "status", "192.168.0.5"]);
-    assert_eq!(output.status.code(), Some(1));
+#[tokio::test(flavor = "multi_thread")]
+async fn a_json_failure_goes_to_stderr_as_json_and_only_once() {
+    let bulb = deaf_bulb().await;
+    let addr = bulb.addr().to_string();
+    let target = addr.clone();
+
+    let output = tokio::task::spawn_blocking(move || {
+        wizlight(&["--json", "--timeout", "0.05", "status", &addr])
+    })
+    .await
+    .expect("the command ran");
+
+    assert_eq!(output.status.code(), Some(4));
     assert!(
         output.stdout.is_empty(),
         "results go to stdout, errors do not"
@@ -231,7 +253,7 @@ fn a_json_failure_goes_to_stderr_as_json_and_only_once() {
     let value: Value = serde_json::from_str(stderr.trim()).expect("stderr is JSON under --json");
     assert_eq!(value["ok"], Value::Bool(false));
     assert_eq!(value["command"], "status");
-    assert_eq!(value["target"], "192.168.0.5");
+    assert_eq!(value["target"], target);
 }
 
 /// Long enough for a loopback registration and the `getSystemConfig` that
@@ -341,6 +363,416 @@ async fn discover_reports_a_bulb_that_will_not_describe_itself() {
     )
     .expect("utf-8");
     assert_eq!(human.trim(), "9877d523a4da  127.0.0.1  -  -");
+}
+
+/// Runs a command against a bulb, addressing it by whatever `target` says.
+///
+/// `--broadcast` points any scan at the mock rather than at the LAN, and the
+/// windows are short because everything here is loopback.
+async fn against(bulb: &MockBulb, target: &str, args: &[&str]) -> Output {
+    let addr = bulb.addr().to_string();
+    let target = target.to_owned();
+    let mut owned: Vec<String> = vec![
+        "--broadcast".into(),
+        addr,
+        "--wait".into(),
+        SCAN.into(),
+        "--timeout".into(),
+        "0.5".into(),
+    ];
+    owned.extend(args.iter().map(|arg| (*arg).to_string()));
+    owned.push(target);
+
+    tokio::task::spawn_blocking(move || {
+        let borrowed: Vec<&str> = owned.iter().map(String::as_str).collect();
+        wizlight(&borrowed)
+    })
+    .await
+    .expect("the command ran")
+}
+
+/// Lets a bulb answer the scan, then stops it answering anything else.
+async fn goes_quiet_once_scanned(bulb: &MockBulb) {
+    for _ in 0..400 {
+        if !bulb.requests().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    bulb.drop_next(usize::MAX);
+}
+
+fn stdout_json(output: &Output) -> Value {
+    let stdout = std::str::from_utf8(&output.stdout).expect("utf-8");
+    serde_json::from_str(stdout.trim()).unwrap_or_else(|err| panic!("{err}: {stdout}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_reports_what_the_bulb_says_it_is_doing() {
+    let bulb = MockBulb::builder()
+        .mac("9877d5230f0a")
+        .pilot(serde_json::json!({
+            "state": true, "r": 255, "g": 80, "b": 0, "dimming": 40, "sceneId": 0, "rssi": -52
+        }))
+        .start()
+        .await;
+    let addr = bulb.addr().to_string();
+
+    let human = against(&bulb, &addr, &["status"]).await;
+    assert_eq!(human.status.code(), Some(0));
+    let line = String::from_utf8(human.stdout).expect("utf-8");
+    assert_eq!(line.trim(), "on  rgb 255,80,0  40%  -52 dBm");
+
+    let json = stdout_json(&against(&bulb, &addr, &["--json", "status"]).await);
+    assert_eq!(json["ok"], Value::Bool(true));
+    assert_eq!(json["command"], "status");
+    assert_eq!(json["result"]["state"], Value::Bool(true));
+    assert_eq!(json["result"]["r"], 255);
+    assert_eq!(json["result"]["dimming"], 40);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_names_a_running_scene() {
+    let bulb = MockBulb::builder()
+        .pilot(serde_json::json!({"state": true, "sceneId": 4, "speed": 100, "dimming": 100}))
+        .start()
+        .await;
+    let addr = bulb.addr().to_string();
+
+    let human = String::from_utf8(against(&bulb, &addr, &["status"]).await.stdout).expect("utf-8");
+    assert!(human.contains("scene Party (4)"), "{human}");
+
+    let json = stdout_json(&against(&bulb, &addr, &["--json", "status"]).await);
+    assert_eq!(json["result"]["sceneId"], 4);
+    assert_eq!(json["result"]["scene"], "Party");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn info_describes_the_model_and_what_it_can_do() {
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    let human = String::from_utf8(against(&bulb, &addr, &["info"]).await.stdout).expect("utf-8");
+    assert!(human.contains("ESP25_SHRGB_01"), "{human}");
+    assert!(human.contains("1.38.0"), "{human}");
+    assert!(human.contains("2200-6500 K"), "{human}");
+    assert!(human.contains("colour"), "{human}");
+
+    let json = stdout_json(&against(&bulb, &addr, &["--json", "info"]).await);
+    assert_eq!(json["result"]["class"], "RGB");
+    assert_eq!(json["result"]["features"]["color"], Value::Bool(true));
+    assert_eq!(json["result"]["kelvin_range"]["min"], 2200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scenes_lists_only_what_that_class_plays() {
+    // A tunable white bulb has no colour, so the colour-only scenes are not
+    // offered to it. Printing the whole table would be the easy thing to do
+    // and would be wrong.
+    let colour = MockBulb::start().await;
+    let white = MockBulb::builder()
+        .personality(Personality::tunable_white())
+        .start()
+        .await;
+    let colour_addr = colour.addr().to_string();
+    let white_addr = white.addr().to_string();
+
+    let listed =
+        String::from_utf8(against(&colour, &colour_addr, &["scenes"]).await.stdout).expect("utf-8");
+    assert!(listed.contains("Party"), "{listed}");
+
+    let listed =
+        String::from_utf8(against(&white, &white_addr, &["scenes"]).await.stdout).expect("utf-8");
+    assert!(!listed.contains("Party"), "{listed}");
+    assert!(listed.contains("Cozy"), "{listed}");
+
+    let json = stdout_json(&against(&white, &white_addr, &["--json", "scenes"]).await);
+    let scenes = json["result"].as_array().expect("a list");
+    assert!(scenes.iter().all(|scene| scene["name"] != "Party"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn on_sends_the_colour_it_was_given() {
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    let output = against(&bulb, &addr, &["on", "--rgb", "255,80,0", "-b", "40"]).await;
+    assert_eq!(output.status.code(), Some(0));
+
+    let request = bulb.last_request().expect("a write arrived");
+    assert_eq!(request["method"], "setPilot");
+    assert_eq!(request["params"]["state"], Value::Bool(true));
+    assert_eq!(request["params"]["r"], 255);
+    assert_eq!(request["params"]["g"], 80);
+    assert_eq!(request["params"]["b"], 0);
+    assert_eq!(request["params"]["dimming"], 40);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hsv_is_converted_because_the_protocol_has_none() {
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    // Pure red at full saturation and value.
+    against(&bulb, &addr, &["on", "--hsv", "0,100,100"]).await;
+    let request = bulb.last_request().expect("a write arrived");
+    assert_eq!(request["params"]["r"], 255);
+    assert_eq!(request["params"]["g"], 0);
+    assert_eq!(request["params"]["b"], 0);
+
+    // Half value halves the channels; it is not the bulb's own dimming, which
+    // is not sent at all here.
+    against(&bulb, &addr, &["on", "--hsv", "120,100,50"]).await;
+    let request = bulb.last_request().expect("a write arrived");
+    assert_eq!(request["params"]["g"], 128);
+    assert_eq!(request["params"]["dimming"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scene_is_named_or_numbered_and_matched_leniently() {
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    for spelling in ["Deep dive", "deep-dive", "DEEPDIVE", "23"] {
+        against(&bulb, &addr, &["on", "--scene", spelling]).await;
+        let request = bulb.last_request().expect("a write arrived");
+        assert_eq!(request["params"]["sceneId"], 23, "{spelling}");
+    }
+
+    // An id the bulb accepts and then does something else with is refused
+    // before it is sent: 41 plays at a third of normal brightness.
+    let output = against(&bulb, &addr, &["on", "--scene", "41"]).await;
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a bad value is a usage error"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn off_and_toggle_write_the_power_state() {
+    let bulb = MockBulb::builder()
+        .pilot(serde_json::json!({"state": true, "dimming": 100}))
+        .start()
+        .await;
+    let addr = bulb.addr().to_string();
+
+    against(&bulb, &addr, &["off"]).await;
+    assert_eq!(
+        bulb.last_request().expect("a write")["params"]["state"],
+        Value::Bool(false)
+    );
+
+    // The bulb is now off, so a toggle turns it back on.
+    let output = against(&bulb, &addr, &["toggle"]).await;
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        bulb.last_request().expect("a write")["params"]["state"],
+        Value::Bool(true)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf-8").trim(),
+        "on"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_uses_set_state_and_needs_something_to_set() {
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    against(&bulb, &addr, &["set", "--kelvin", "2700"]).await;
+    let request = bulb.last_request().expect("a write arrived");
+    assert_eq!(request["method"], "setState");
+    assert_eq!(request["params"]["temp"], 2700);
+
+    // `on` is complete on its own and `set` is not, which no single clap group
+    // can express — but it is still a usage error, and exits like one.
+    let output = against(&bulb, &addr, &["set"]).await;
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).expect("utf-8");
+    assert!(stderr.contains("needs something to set"), "{stderr}");
+    assert!(stderr.contains("Usage:"), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_ways_of_saying_a_colour_is_a_usage_error() {
+    // clap rejects it before anything is sent. `PilotBuilder` refuses the same
+    // pair, but only once the command is running and with no flag to name.
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    for pair in [
+        vec!["--rgb", "255,0,0", "--kelvin", "2700"],
+        vec!["--rgb", "255,0,0", "--hsv", "0,100,100"],
+        vec!["--scene", "Party", "--kelvin", "2700"],
+    ] {
+        let mut args = vec!["on"];
+        args.extend(pair.iter().copied());
+        let output = against(&bulb, &addr, &args).await;
+        assert_eq!(output.status.code(), Some(2), "{pair:?}");
+        assert!(bulb.requests().is_empty(), "{pair:?} reached the bulb");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn asking_a_bulb_for_what_it_has_no_hardware_for_names_its_class() {
+    // The bulb will not refuse this itself — measured: it answers `success`
+    // for parameters it has nothing to apply to.
+    let bulb = MockBulb::builder()
+        .personality(Personality::dimmable_white())
+        .start()
+        .await;
+    let addr = bulb.addr().to_string();
+
+    let output = against(&bulb, &addr, &["on", "--rgb", "255,0,0"]).await;
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).expect("utf-8");
+    assert!(stderr.contains("ESP06_SHDW9_01"), "{stderr}");
+    assert!(stderr.contains("Dimmable White"), "{stderr}");
+    assert!(stderr.contains("cannot show a colour"), "{stderr}");
+
+    // And it was refused before any write went out.
+    assert!(
+        bulb.requests().iter().all(|raw| !raw.contains("setPilot")),
+        "{:?}",
+        bulb.requests()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_target_may_be_a_mac_in_any_spelling() {
+    let bulb = MockBulb::builder().mac("9877d5230f0a").start().await;
+
+    for spelling in ["9877d5230f0a", "98:77:d5:23:0f:0a", "9877D5230F0A"] {
+        let output = against(&bulb, spelling, &["--json", "status"]).await;
+        assert_eq!(output.status.code(), Some(0), "{spelling}");
+        // The envelope echoes the argument as it was typed.
+        assert_eq!(stdout_json(&output)["target"], spelling);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mac_nothing_answers_to_is_not_found_rather_than_a_failure() {
+    let bulb = MockBulb::builder().mac("9877d5230f0a").start().await;
+
+    let output = against(&bulb, "aabbccddeeff", &["status"]).await;
+    assert_eq!(output.status.code(), Some(3), "not found has its own code");
+    let stderr = String::from_utf8(output.stderr).expect("utf-8");
+    assert!(stderr.contains("aabbccddeeff"), "{stderr}");
+    assert!(stderr.contains("powered off"), "{stderr}");
+}
+
+#[test]
+fn a_target_that_is_neither_an_address_nor_a_mac_is_a_usage_error() {
+    let output = wizlight(&["status", "kitchen"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).expect("utf-8");
+    assert!(
+        stderr.contains("neither an IP address nor a MAC"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_command_needs_a_target_or_all_and_not_both() {
+    assert_eq!(wizlight(&["status"]).status.code(), Some(2));
+    assert_eq!(
+        wizlight(&["status", "--all", "9877d5230f0a"]).status.code(),
+        Some(2)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn all_fans_out_and_one_failure_does_not_hide_the_others() {
+    let working = MockBulb::builder()
+        .mac("9877d5230f0a")
+        .pilot(serde_json::json!({"state": true, "dimming": 100}))
+        .start()
+        .await;
+    let deaf = MockBulb::builder().mac("9877d523a4da").start().await;
+    let addrs = [working.addr().to_string(), deaf.addr().to_string()];
+
+    let output = tokio::task::spawn_blocking(move || {
+        wizlight(&[
+            "--json",
+            "--broadcast",
+            &addrs[0],
+            "--broadcast",
+            &addrs[1],
+            "--wait",
+            SCAN,
+            "--timeout",
+            "0.05",
+            "status",
+            "--all",
+        ])
+    });
+    // It answers the scan and then goes quiet, so it is found and then
+    // unreachable — waited for rather than timed, because a cold debug binary
+    // can take longer to start than any sleep worth writing.
+    goes_quiet_once_scanned(&deaf).await;
+    let output = output.await.expect("the command ran");
+
+    assert_eq!(output.status.code(), Some(1), "a partial failure is not 0");
+    let json = stdout_json(&output);
+    assert_eq!(json["ok"], Value::Bool(false));
+    assert_eq!(json["target"], Value::Null);
+
+    let results = json["result"].as_array().expect("one entry per bulb");
+    assert_eq!(results.len(), 2);
+    // Sorted by MAC, so a fan-out can be diffed between runs.
+    assert_eq!(results[0]["target"], "9877d5230f0a");
+    assert_eq!(results[0]["ok"], Value::Bool(true));
+    assert_eq!(results[0]["result"]["state"], Value::Bool(true));
+    assert_eq!(results[1]["target"], "9877d523a4da");
+    assert_eq!(results[1]["ok"], Value::Bool(false));
+    assert!(
+        results[1]["error"]
+            .as_str()
+            .expect("a message")
+            .contains("no reply"),
+        "{}",
+        results[1]["error"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fan_out_labels_every_line_with_the_bulb_it_came_from() {
+    let one = MockBulb::builder()
+        .mac("9877d5230f0a")
+        .pilot(serde_json::json!({"state": true, "dimming": 100}))
+        .start()
+        .await;
+    let two = MockBulb::builder()
+        .mac("9877d523a4da")
+        .pilot(serde_json::json!({"state": false, "dimming": 40}))
+        .start()
+        .await;
+    let addrs = [one.addr().to_string(), two.addr().to_string()];
+
+    let output = tokio::task::spawn_blocking(move || {
+        wizlight(&[
+            "--broadcast",
+            &addrs[0],
+            "--broadcast",
+            &addrs[1],
+            "--wait",
+            SCAN,
+            "status",
+            "--all",
+        ])
+    })
+    .await
+    .expect("the command ran");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    // One line per bulb, MAC first, so the output stays greppable.
+    assert_eq!(
+        stdout.trim(),
+        "9877d5230f0a  on  100%\n9877d523a4da  off  40%"
+    );
 }
 
 #[test]

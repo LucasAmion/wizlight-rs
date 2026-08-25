@@ -35,21 +35,38 @@
 //! answered, and nothing here yet fails at a bulb that was supposed to be
 //! listening.
 
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
 use serde_json::{Value, json};
+use tokio::task::JoinSet;
 
+mod describe;
 mod discover;
 mod output;
+mod pilot;
+mod target;
 
 pub use output::{
     HumanRenderer, JsonRenderer, OutputRenderer, colour_on_stderr, colour_on_stdout, render_json,
 };
+pub use pilot::{ColourOptions, StateOptions};
+pub use target::{BadTarget, NotFound, Resolved, TargetSpec};
 
-use crate::{PORT, RetryPolicy};
+use crate::{Bulb, Discovery, Error, PORT, RetryPolicy};
+
+/// Exit code for a target that nothing answered to.
+///
+/// Separate from a failure to talk to a bulb that *was* there, because the two
+/// call for different reactions: this one wants a re-scan, a
+/// [timeout](EXIT_TIMEOUT) wants a retry.
+pub const EXIT_NOT_FOUND: u8 = 3;
+
+/// Exit code for a bulb that was found and then stopped answering.
+pub const EXIT_TIMEOUT: u8 = 4;
 
 /// Global CLI flags shared across all commands.
 ///
@@ -119,6 +136,21 @@ impl Cli {
             ..RetryPolicy::default()
         }
     }
+
+    /// The discovery run the globals ask for.
+    ///
+    /// `system_config` costs a round trip per bulb and is only worth paying
+    /// for a listing. Resolving a MAC does not need it: the broadcast reply
+    /// already carries the one field being matched on.
+    #[must_use]
+    pub fn discovery(&self, system_config: bool) -> Discovery {
+        let discovery = Discovery::new()
+            .system_config(system_config)
+            .policy(self.policy());
+        self.broadcast
+            .iter()
+            .fold(discovery, |discovery, addr| discovery.target(*addr))
+    }
 }
 
 /// Parses a number of seconds, which may be fractional.
@@ -148,11 +180,54 @@ fn address(input: &str) -> Result<SocketAddr, String> {
         .map_err(|_| format!("`{input}` is not an address"))
 }
 
-/// The bulb a command acts on.
+/// Which bulbs a command acts on: one named, or all of them.
+///
+/// Exactly one of the two is required, and clap enforces that — `--all` with
+/// a target is a contradiction, and neither is a command with nothing to act
+/// on.
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
+#[group(required = true, multiple = false)]
 pub struct Target {
-    /// The target bulb, as an IP address or MAC.
-    pub target: String,
+    /// The target bulb, as an IP address or a MAC.
+    #[arg(value_name = "TARGET")]
+    pub target: Option<TargetSpec>,
+
+    /// Act on every bulb a scan finds.
+    #[arg(long)]
+    pub all: bool,
+}
+
+/// A command that writes state: which bulbs, and what to set.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct Write {
+    /// Which bulbs to write to.
+    #[command(flatten)]
+    pub target: Target,
+
+    /// What to set.
+    #[command(flatten)]
+    pub options: StateOptions,
+}
+
+/// One bulb's contribution to a command's output.
+///
+/// A fan-out collects one of these per bulb; a single target produces one and
+/// renders it alone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Report {
+    json: Value,
+    human: String,
+}
+
+impl Report {
+    /// Builds a report from its two renderings.
+    #[must_use]
+    pub fn new(json: Value, human: impl Into<String>) -> Self {
+        Self {
+            json,
+            human: human.into(),
+        }
+    }
 }
 
 /// Supported commands.
@@ -168,14 +243,18 @@ pub enum Command {
     Status(Target),
     /// Print model info and supported capabilities for a target bulb.
     Info(Target),
-    /// Power a bulb on.
-    On(Target),
+    /// Power a bulb on, optionally setting what it shows.
+    On(Write),
     /// Power a bulb off.
     Off(Target),
     /// Toggle the power state of a bulb.
     Toggle(Target),
-    /// Change a bulb's state.
-    Set(Target),
+    /// Change what a bulb shows, with `setState`.
+    ///
+    /// This does not leave a bulb that was off alone: measured on
+    /// `ESP25_SHRGB_01` fw 1.38.0, `setState` turns it on exactly as
+    /// `setPilot` does.
+    Set(Write),
     /// List the scenes supported by the target bulb.
     Scenes(Target),
     /// Tail `syncPilot` push updates from a target bulb.
@@ -202,21 +281,29 @@ impl Command {
         }
     }
 
-    /// The bulb this command acts on, if it takes one.
+    /// Which bulbs this command acts on, if it takes any.
     #[must_use]
-    pub fn target(&self) -> Option<&str> {
+    pub fn selection(&self) -> Option<&Target> {
         match self {
             Self::Discover => None,
+            Self::On(write) | Self::Set(write) => Some(&write.target),
             Self::Status(t)
             | Self::Info(t)
-            | Self::On(t)
             | Self::Off(t)
             | Self::Toggle(t)
-            | Self::Set(t)
             | Self::Scenes(t)
             | Self::Bench(t)
-            | Self::Watch(t) => Some(&t.target),
+            | Self::Watch(t) => Some(t),
         }
+    }
+
+    /// The target as it was spelled on the command line, for output to echo.
+    ///
+    /// `None` under `--all`, where there is no one target and each bulb
+    /// carries its own label in the results.
+    #[must_use]
+    pub fn target(&self) -> Option<&str> {
+        Some(self.selection()?.target.as_ref()?.raw())
     }
 }
 
@@ -230,16 +317,36 @@ impl Command {
 pub struct Outcome {
     result: Value,
     human: String,
+    ok: bool,
 }
 
 impl Outcome {
-    /// An outcome carrying its `result` payload and its human rendering.
+    /// An outcome where everything the command touched succeeded.
     #[must_use]
     pub fn new(result: Value, human: impl Into<String>) -> Self {
         Self {
             result,
             human: human.into(),
+            ok: true,
         }
+    }
+
+    /// An outcome with results worth printing and a failure to report.
+    ///
+    /// A fan-out that lost one bulb of three still has two results the caller
+    /// wants, and still must not exit `0`.
+    #[must_use]
+    pub fn partial(result: Value, human: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            ..Self::new(result, human)
+        }
+    }
+
+    /// Whether the command did what was asked, everywhere it was asked.
+    #[must_use]
+    pub const fn succeeded(&self) -> bool {
+        self.ok
     }
 
     /// Renders the outcome in the format the caller asked for.
@@ -247,7 +354,7 @@ impl Outcome {
     pub fn render(&self, command: &Command, json: bool) -> String {
         let payload = if json {
             json!({
-                "ok": true,
+                "ok": self.ok,
                 "command": command.name(),
                 "target": command.target(),
                 "result": self.result,
@@ -266,15 +373,158 @@ impl Outcome {
 /// Whatever the command failed with. Commands that are still stubbed fail
 /// saying so.
 pub async fn run_command(cli: &Cli) -> anyhow::Result<Outcome> {
-    let policy = cli.policy();
     match &cli.command {
-        Command::Discover => {
-            discover::run(&discover::discovery(&cli.broadcast, &policy), cli.wait).await
+        Command::Discover => discover::run(&cli.discovery(true), cli.wait).await,
+        Command::Status(target) => {
+            act(
+                cli,
+                target,
+                |bulb| async move { pilot::status(&bulb).await },
+            )
+            .await
+        }
+        Command::Info(target) => {
+            act(
+                cli,
+                target,
+                |bulb| async move { describe::info(&bulb).await },
+            )
+            .await
+        }
+        Command::Scenes(target) => {
+            act(
+                cli,
+                target,
+                |bulb| async move { describe::scenes(&bulb).await },
+            )
+            .await
+        }
+        Command::On(write) => {
+            let options = write.options.clone();
+            act(cli, &write.target, move |bulb| {
+                let options = options.clone();
+                async move { pilot::power(&bulb, true, &options).await }
+            })
+            .await
+        }
+        Command::Off(target) => {
+            act(cli, target, |bulb| async move {
+                pilot::power(&bulb, false, &StateOptions::default()).await
+            })
+            .await
+        }
+        Command::Toggle(target) => {
+            act(
+                cli,
+                target,
+                |bulb| async move { pilot::toggle(&bulb).await },
+            )
+            .await
+        }
+        Command::Set(write) => {
+            let options = write.options.clone();
+            act(cli, &write.target, move |bulb| {
+                let options = options.clone();
+                async move { pilot::set(&bulb, &options).await }
+            })
+            .await
         }
         other => anyhow::bail!(
             "`{}` is not implemented yet; this is the CLI scaffold",
             other.name()
         ),
+    }
+}
+
+/// Resolves the target, runs `op` against every bulb it named, and collects
+/// the results.
+///
+/// One place for the whole shape of a per-bulb command: resolution, the
+/// fan-out, and the rule that one bulb failing does not abort the others.
+async fn act<F, Fut>(cli: &Cli, selection: &Target, op: F) -> anyhow::Result<Outcome>
+where
+    F: Fn(Bulb) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = anyhow::Result<Report>> + Send + 'static,
+{
+    let policy = cli.policy();
+    let discovery = cli.discovery(false);
+
+    if let Some(spec) = &selection.target {
+        let bulb = target::resolve(spec, &discovery, cli.wait).await?;
+        let report = op(bulb.connect(&policy).await?).await?;
+        return Ok(Outcome::new(report.json, report.human));
+    }
+
+    let bulbs = target::resolve_all(&discovery, cli.wait).await?;
+    tracing::info!(bulbs = bulbs.len(), "fanning out");
+
+    // Concurrently, because the alternative is a round trip per bulb in
+    // series, and a room's worth of bulbs changing colour one after another
+    // looks like a fault.
+    let mut tasks = JoinSet::new();
+    for bulb in bulbs {
+        let op = op.clone();
+        let policy = policy.clone();
+        tasks.spawn(async move {
+            let label = bulb.label();
+            let result = match bulb.connect(&policy).await {
+                Ok(handle) => op(handle).await,
+                Err(err) => Err(err.into()),
+            };
+            (label, result)
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(joined) = tasks.join_next().await {
+        results.push(joined?);
+    }
+    results.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Ok(collect(results))
+}
+
+/// Turns per-bulb results into one outcome.
+///
+/// A bulb that failed appears in the output next to the ones that worked —
+/// hiding it would make a fan-out over a room a coin toss — and its presence
+/// is what makes the exit code non-zero.
+fn collect(results: Vec<(String, anyhow::Result<Report>)>) -> Outcome {
+    let failed = results.iter().filter(|(_, r)| r.is_err()).count();
+    let json: Vec<Value> = results
+        .iter()
+        .map(|(label, result)| match result {
+            Ok(report) => json!({"target": label, "ok": true, "result": report.json}),
+            Err(err) => json!({"target": label, "ok": false, "error": err.to_string()}),
+        })
+        .collect();
+    let human = results
+        .iter()
+        .map(|(label, result)| match result {
+            Ok(report) => prefixed(label, &report.human),
+            Err(err) => prefixed(label, &format!("error: {err}")),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let value = Value::Array(json);
+    if failed == 0 {
+        Outcome::new(value, human)
+    } else {
+        Outcome::partial(value, human)
+    }
+}
+
+/// Labels a bulb's slice of a fan-out.
+///
+/// A one-line report stays on one line, so `--all` output remains greppable;
+/// anything longer gets a heading and an indent, because a `scenes` listing
+/// with a MAC repeated down the left margin is unreadable.
+fn prefixed(label: &str, body: &str) -> String {
+    if body.contains('\n') {
+        let indented: Vec<String> = body.lines().map(|line| format!("  {line}")).collect();
+        format!("{label}:\n{}", indented.join("\n"))
+    } else {
+        format!("{label}  {body}")
     }
 }
 
@@ -308,6 +558,20 @@ pub fn renderer(json: bool) -> Box<dyn OutputRenderer> {
     }
 }
 
+/// The exit code a failure deserves.
+///
+/// `downcast_ref` searches the whole context chain, so a library error keeps
+/// its meaning however many layers of context it picked up on the way out.
+fn exit_code(err: &anyhow::Error) -> ExitCode {
+    if err.downcast_ref::<NotFound>().is_some() {
+        return ExitCode::from(EXIT_NOT_FOUND);
+    }
+    if matches!(err.downcast_ref::<Error>(), Some(Error::Timeout { .. })) {
+        return ExitCode::from(EXIT_TIMEOUT);
+    }
+    ExitCode::FAILURE
+}
+
 /// Installs the log subscriber for the requested verbosity.
 ///
 /// `RUST_LOG` wins when it is set, so the flag is a shorthand rather than a
@@ -337,6 +601,13 @@ fn init_logging(verbose: u8, json: bool) {
 #[must_use]
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
+    // The one rule clap's own derive cannot state, reported the way clap
+    // would have: `set` with nothing to set exits 2 like any other misuse.
+    if let Command::Set(write) = &cli.command {
+        if let Err(err) = write.options.require_something(&mut Cli::command()) {
+            err.exit();
+        }
+    }
     init_logging(cli.verbose, cli.json);
 
     tracing::debug!(
@@ -367,14 +638,20 @@ pub fn run() -> ExitCode {
     match runtime.block_on(run_command(&cli)) {
         Ok(outcome) => {
             println!("{}", outcome.render(&cli.command, cli.json));
-            ExitCode::SUCCESS
+            if outcome.succeeded() {
+                ExitCode::SUCCESS
+            } else {
+                // The results are on stdout and the bulbs that failed are
+                // named in them, so there is nothing to add on stderr.
+                ExitCode::FAILURE
+            }
         }
         Err(err) => {
             eprintln!(
                 "{}",
                 render_failure(Some(&cli.command), &err.to_string(), cli.json)
             );
-            ExitCode::FAILURE
+            exit_code(&err)
         }
     }
 }
