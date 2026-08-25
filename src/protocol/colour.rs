@@ -172,14 +172,17 @@ fn trapezoid(hue_vec: Vec2, saturation: f64) -> ([u8; 3], u8) {
 
 /// Which of the two white emitters a blend drives.
 ///
-/// See [`ColourStrategy`](ColourStrategy#cold-or-warm): `pywizlight` computes
-/// a cold white and then sends it as a warm one, so both are offered here and
-/// neither is claimed to be the right one.
+/// Measured: the one that **matches the hue** preserves it, and the opposing
+/// one washes the colour to white — so warm for warm hues, cold for cool ones,
+/// and neither is right in general. See
+/// [`ColourStrategy`](ColourStrategy#cold-or-warm).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum WhiteChannel {
-    /// The ~6200 K emitter, `c`. What the algorithm says it computes.
+    /// The ~6200 K emitter, `c`. What `pywizlight`'s algorithm says it
+    /// computes, and the better choice for a **cool** hue.
     Cold,
-    /// The ~2800 K emitter, `w`. What `pywizlight` actually sends.
+    /// The ~2800 K emitter, `w`. What `pywizlight` actually sends, and the
+    /// better choice for a **warm** hue.
     Warm,
 }
 
@@ -210,29 +213,65 @@ pub enum WhiteChannel {
 /// # Ok::<(), wizlight::Error>(())
 /// ```
 ///
+/// # Which to use
+///
+/// Judged by eye on two `ESP25_SHRGB_01` bulbs (firmware 1.38.0, `dimming:
+/// 100`), one lamp at a time with the two candidates blinded:
+///
+/// - **A near-white is better from the blend**, decisively and every time. Raw
+///   RGB mixes it from three colour emitters at once and it comes out dim and
+///   slightly off; the white emitter is simply better at being white.
+/// - **A saturated colour is identical either way** — above saturation 0.5 the
+///   blend adds so little white that the two converge, and at full saturation
+///   they are the same channels.
+/// - **A warm hue never preferred the blend**, and everything in between was
+///   too close to call: pale peach, pale pink and sky blue each came out
+///   differently on repeat runs. Where the eye cannot decide, decide on
+///   something else.
+///
+/// The claim this replaces — `pywizlight`'s, that the blend gives "far better
+/// pastels" — did not survive being blinded. It holds for near-whites, which
+/// is a narrower thing.
+///
+/// # Cold or warm?
+///
+/// `pywizlight` contradicts itself here: its algorithm computes a value it
+/// calls `cw` and documents as the cold white, and its client sends that number
+/// on **`w`, the warm white channel**. Measured, **both are right, for
+/// different hues**:
+///
+/// > The emitter whose colour temperature *matches the hue* preserves it. The
+/// > opposing one erases it — a warm pastel under the cold white reads as
+/// > plain white, and a cool one under the warm white does the same.
+///
+/// That held on every colour tried, under two methods, one of them blind. So
+/// [`WhiteChannel`] is the caller's choice not for lack of evidence but
+/// because the evidence says it depends: **warm for warm hues, cold for cool
+/// ones**, and neither globally. Picking the emitter from the hue is a better
+/// strategy than either fixed choice, and is deliberately not implemented here
+/// — this type is a faithful port, and that would be a new algorithm.
+///
 /// # The shared power budget
 ///
 /// The five emitters draw on **one power budget**, which is why every channel
 /// at `255` is not the brightest setting the bulb has: asking for everything
-/// splits the same power five ways. Mixing a pastel from white plus a little
-/// colour therefore tends to look better *and* brighter than mixing it from
-/// three colour emitters at partial strength, and that is the whole reason
-/// [`ColourStrategy::Trapezoid`] exists.
+/// splits the same power five ways.
 ///
-/// This paragraph is **inherited, not measured**: the emitter count, the
-/// ~6200 K and ~2800 K figures and the shared budget all come from
-/// `pywizlight`'s notes. None of it has been checked against hardware here,
-/// and neither has the claim that the blend looks better — which is why both
-/// strategies exist rather than just the better one.
+/// The emitter count and the ~6200 K / ~2800 K figures are `pywizlight`'s and
+/// remain unverified, but the budget itself showed up plainly: a cold white of
+/// **33 out of a possible 128** is enough to visibly whiten a fully saturated
+/// orange. The white emitters put out far more light per unit than the colour
+/// ones, which is why the blend brightens a near-white and why it takes so
+/// little of it to lose a tint.
 ///
-/// # Cold or warm?
+/// # What the blend cannot do
 ///
-/// `pywizlight` contradicts itself, and the contradiction is why
-/// [`WhiteChannel`] is a parameter at all: its algorithm computes a value it
-/// calls `cw` and documents as the cold white, and its client then sends that
-/// number on **`w`, the warm white channel**. One of the two is a bug, and the
-/// source cannot say which. So both are offered, neither is presented as
-/// correct, and they will not look the same on a wall.
+/// Below saturation 0.5 the algorithm keeps **one** primary and leaves the
+/// white emitter to supply everything else. Some colours are therefore
+/// unreachable: a pale pink becomes `r89` plus white, which reads as orange
+/// under the warm emitter and as white under the cold one, and never as pink.
+/// [`ColourStrategy::Rgb`] renders that colour correctly, because it keeps all
+/// three primaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ColourStrategy {
     /// Send the colour as it is, and leave both whites at zero.

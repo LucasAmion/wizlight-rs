@@ -160,14 +160,13 @@ fails a test. Density beyond that only made the table harder to review.
 The dense checking that is worth doing needs no recorded answers, and sweeps a
 million colours for range, stability and round-trip error.
 
-**None of it has been checked against hardware yet** — that is M2's A/B, and it
-is why both strategies exist rather than only the better one.
+It has since been **checked against hardware** — see the section below, which is
+what decides when to use which.
 
-- **The white channel is the caller's choice, because `pywizlight`
-  contradicts itself.** Its algorithm computes a value it calls `cw` and
-  documents as the cold white (~6200 K); its client then sends that number on
-  `w`, the warm white (~2800 K). One of the two is a bug and the source cannot
-  say which, so `WhiteChannel` offers both and neither is presented as correct.
+- **The white channel is the caller's choice**, because `pywizlight`
+  contradicts itself: its algorithm computes a value it calls `cw` and documents
+  as the cold white (~6200 K), and its client sends that number on `w`, the warm
+  white (~2800 K). Measured, both are right for half the hue circle — see below.
 - **Saturation is discontinuous at 0.5**, which is the point of the algorithm:
   above it the colour stays saturated and the white ramps from 128 to 0, below
   it the white is pinned at 128 and the colour fades to black. The white
@@ -202,6 +201,43 @@ is why both strategies exist rather than only the better one.
 `ColourStrategy::Rgb` is not a port of anything: from an RGB triple it is a
 pass-through, and from `Hs` it is standard HSV at full value, sharing the hue
 geometry so that the two strategies agree exactly at full saturation.
+
+### Measured against hardware: which colour strategy to use
+
+Two `ESP25_SHRGB_01` on firmware 1.38.0, judged by eye at `dimming: 100`, first
+side by side and then one lamp at a time with the two candidates blinded.
+**Blinding reversed two of six verdicts**, so only the blinded pass is quoted;
+seeing two lit lamps at once, and knowing which was which, was worth a
+measurable amount of preference.
+
+- **Cold or warm is not one answer — it depends on the hue.** The emitter whose
+  colour temperature matches the hue preserves it; the opposing one washes the
+  colour to white. Warm for warm hues, cold for cool, on every colour tried and
+  under both methods. `pywizlight`'s code (always warm) and its comments (a cold
+  white) are therefore each right for half the hue circle, and `WhiteChannel`
+  stays the caller's choice for a measured reason rather than for lack of
+  evidence. Choosing the emitter *from the hue* would beat either fixed choice;
+  that is a new algorithm, so it is not in this port.
+- **A near-white is better from the blend**, unanimously, across every run. That
+  is the case the algorithm decisively wins.
+- **"Far better pastels" did not survive blinding.** With the hue-matched
+  emitter, three of the pastels disagreed with themselves between runs, and a
+  warm orange never once preferred the blend. The claim narrows to near-whites.
+- **Lighting both white emitters at once is not the missing piece**: the single
+  hue-matched white won 4 of 5, and both at full was consistently "too white".
+- **The white emitters are far more luminous per unit than the colour ones**:
+  `c=33` out of a possible 128 visibly whitens a fully saturated orange. The
+  shared power budget is real, even though the ~6200 K / ~2800 K figures are
+  still inherited rather than measured.
+- **The blend cannot reach some colours at all.** Below saturation 0.5 it keeps
+  one primary and leaves the white to supply the rest, so a pale pink comes back
+  orange under the warm emitter and white under the cold one — never pink.
+  `ColourStrategy::Rgb` renders it correctly, keeping all three primaries.
+
+Two bulbs, one model, one observer, one room. Enough to overturn an assumption
+that had nothing behind it; not enough to state as a property of WiZ hardware in
+general. Method and full results:
+[`docs/captures/colour-esp25-shrgb-01-fw1.38.0.json`][colour-capture].
 
 ### Where the scene table comes from
 
@@ -288,6 +324,7 @@ is only reachable by asking for `0.1.0-alpha.1` exactly.
 - The `wizlight` binary installs and runs, but has no commands and exits with an
   error explaining that.
 
+[colour-capture]: https://github.com/LucasAmion/wiz-workspace/blob/main/docs/captures/colour-esp25-shrgb-01-fw1.38.0.json
 [light-modes]: https://docs.pro.wizconnected.com/#light-modes
 [Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.1...HEAD
 [0.1.0-alpha.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.1
