@@ -178,9 +178,23 @@ flags only Night light as undimmable, where **Wake up** and **Alarm** ignore
   dimmable white, where WiZ also lists Cool white, Golden white and Diwali. WiZ
   is followed, though its own prose contradicts its own table.
 
+### Deliberately not included
+
+**RGB ↔ RGB+CW conversion.** `pywizlight`'s trapezoid was ported here, validated
+against 361 values recorded from it, and then measured against raw RGB on two
+`ESP25_SHRGB_01`. It renders a near-white better and ties or loses everywhere
+else, and below saturation 0.5 it keeps a single primary and lets the white
+supply the rest — so some colours, a pale pink among them, are unreachable
+through it at any setting.
+
+Rather than ship an algorithm we would not recommend, and freeze it in the
+public API under semver, the crate stays a protocol client: send `r`/`g`/`b`
+with `PilotBuilder::rgb`, or all five channels with `rgbww`, and decide how to
+mix a colour in the layer that knows what the colour is for. The port, the
+golden table and the measurements are kept in the workspace repo.
+
 ### Known gaps
 
-- No RGB ↔ RGB+CW conversion.
 - No streaming path and no `syncPilot` push listener.
 - `getPilot` per-head reads are not implemented. `devices` uses a one-based
   convention for writes and a zero-based one for reads, and only the former is
