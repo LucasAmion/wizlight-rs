@@ -199,6 +199,11 @@ soon as that bulb answers.
 finds, concurrently. One bulb failing does not abort the rest, and does not let
 the run exit `0` either.
 
+It always costs the full scan, though — around five seconds — because there is
+no way to know that the last bulb has answered. When you know how many to
+expect, `--wait 1` is plenty on a quiet network: both bulbs here answer a
+broadcast in about 100 ms.
+
 The ways of naming a colour are mutually exclusive, and clap rejects two of them
 before anything is sent. `--scene` takes an id or a name, matched ignoring case
 and punctuation. Asking a bulb for something it has no hardware for — colour on
