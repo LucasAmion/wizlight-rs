@@ -44,6 +44,12 @@ plan-jobs = ["./verify"]
 # no crates.io publisher. It has to exist because generating this workflow
 # overwrote the hand-written one that published the crate.
 publish-jobs = ["homebrew", "./publish-crates"]
+# Custom publish jobs default to `{ id-token = "write", packages = "write" }`,
+# and overriding replaces that set rather than adding to it. `contents = "read"`
+# is what actions/checkout needs; without it the job requests more than the
+# caller granted, and GitHub kills the entire release run at startup rather than
+# failing that one job. `packages` is dropped because nothing here uses it.
+github-custom-job-permissions = { "publish-crates" = { id-token = "write", contents = "read" } }
 # Publish prereleases too.
 #
 # Every release so far is an alpha whose whole purpose is to exercise the release
