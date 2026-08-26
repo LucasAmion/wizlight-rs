@@ -203,13 +203,24 @@ impl PilotBuilder {
         self
     }
 
-    /// Sets `r`/`g`/`b`/`w`.
+    /// Sets `r`/`g`/`b`/`w`, where `w` is the **warm** white emitter.
+    ///
+    /// The cold one is left alone; [`rgbww`](PilotBuilder::rgbww) sets both.
     #[must_use]
     pub fn rgbw(self, r: Channel, g: Channel, b: Channel, w: Channel) -> Self {
         self.rgb(r, g, b).warm_white(w)
     }
 
-    /// Sets `r`/`g`/`b`/`c`/`w`.
+    /// Sets `r`/`g`/`b`/`c`/`w` — **cold white then warm white**, matching
+    /// `pywizlight`'s `rgbww` tuple and Home Assistant's `rgbww` colour mode.
+    ///
+    /// Worth stating rather than leaving to the parameter list, because the
+    /// name says "ww" while the signature takes one of each, and swapping the
+    /// two is silent: the bulb accepts it and lights the wrong emitter.
+    ///
+    /// A shorthand for the three setters, with no behaviour of its own —
+    /// `rgb(r, g, b).cold_white(c).warm_white(w)` puts the same five keys on
+    /// the wire, and either white may be set without the other.
     #[must_use]
     pub fn rgbww(self, r: Channel, g: Channel, b: Channel, c: Channel, w: Channel) -> Self {
         self.rgb(r, g, b).cold_white(c).warm_white(w)
@@ -747,6 +758,31 @@ mod tests {
         assert_eq!(after.c.unwrap().get(), 4);
         assert_eq!(after.w.unwrap().get(), 5);
         assert_eq!(after.r.unwrap().get(), 1);
+    }
+
+    #[test]
+    fn rgbww_is_its_three_setters_and_nothing_more() {
+        // Why the CLI spells the five emitters as `--rgb` plus `--cold` /
+        // `--warm` instead of one five-value flag: the tuple is a shorthand,
+        // not a mode of its own, so the two produce the same request and the
+        // pair of flags also expresses what the tuple cannot.
+        let tuple = PilotBuilder::new()
+            .rgbww(
+                Channel::new(255),
+                Channel::new(80),
+                Channel::new(0),
+                Channel::new(12),
+                Channel::new(34),
+            )
+            .params()
+            .unwrap();
+        let separately = PilotBuilder::new()
+            .rgb(Channel::new(255), Channel::new(80), Channel::new(0))
+            .cold_white(Channel::new(12))
+            .warm_white(Channel::new(34))
+            .params()
+            .unwrap();
+        assert_eq!(tuple, separately);
     }
 
     #[test]

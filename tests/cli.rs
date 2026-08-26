@@ -529,6 +529,117 @@ async fn hsv_is_converted_because_the_protocol_has_none() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn the_white_emitters_compose_with_a_colour() {
+    // `r`/`g`/`b` and `c`/`w` are halves of one colour mode, so this is one
+    // request with five channels in it — the same request a single
+    // `--rgbww R,G,B,C,W` flag would have produced.
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    let output = against(
+        &bulb,
+        &addr,
+        &[
+            "--json", "on", "--rgb", "255,80,0", "--cold", "12", "--warm", "34",
+        ],
+    )
+    .await;
+    assert_eq!(output.status.code(), Some(0));
+
+    let request = bulb.last_request().expect("a write arrived");
+    assert_eq!(request["params"]["r"], 255);
+    assert_eq!(request["params"]["g"], 80);
+    assert_eq!(request["params"]["b"], 0);
+    assert_eq!(request["params"]["c"], 12);
+    assert_eq!(request["params"]["w"], 34);
+
+    // Reported back under the bulb's own keys, so a request lines up against
+    // the `c`/`w` a later `status` prints.
+    let json = stdout_json(&output);
+    assert_eq!(json["result"]["c"], 12);
+    assert_eq!(json["result"]["w"], 34);
+
+    // `--hsv` is a spelling of the same triple, so it composes too.
+    against(&bulb, &addr, &["on", "--hsv", "0,100,100", "--warm", "64"]).await;
+    let request = bulb.last_request().expect("a write arrived");
+    assert_eq!(request["params"]["r"], 255);
+    assert_eq!(request["params"]["w"], 64);
+    assert_eq!(request["params"]["c"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_white_emitter_can_be_sent_on_its_own() {
+    // Which is the reason for two flags rather than one five-value tuple:
+    // `--rgb 0,0,0 --warm 128` is a different request, and would explicitly
+    // zero three channels this one does not mention.
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    let output = against(&bulb, &addr, &["set", "--warm", "128"]).await;
+    assert_eq!(output.status.code(), Some(0));
+
+    let request = bulb.last_request().expect("a write arrived");
+    assert_eq!(request["method"], "setState");
+    assert_eq!(request["params"]["w"], 128);
+    assert_eq!(request["params"]["r"], Value::Null);
+
+    // Zero is a value, not an omission: it switches that emitter off, so it
+    // is something to set and it is echoed rather than hidden.
+    let output = against(&bulb, &addr, &["set", "--cold", "0"]).await;
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(bulb.last_request().expect("a write")["params"]["c"], 0);
+    assert!(
+        String::from_utf8(output.stdout)
+            .expect("utf-8")
+            .contains("cold 0")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_white_emitter_conflicts_with_temp_and_scene_but_not_with_a_colour() {
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    for pair in [
+        vec!["--cold", "12", "--kelvin", "2700"],
+        vec!["--warm", "34", "--scene", "Party"],
+    ] {
+        let mut args = vec!["on"];
+        args.extend(pair.iter().copied());
+        let output = against(&bulb, &addr, &args).await;
+        assert_eq!(output.status.code(), Some(2), "{pair:?}");
+        assert!(bulb.requests().is_empty(), "{pair:?} reached the bulb");
+    }
+
+    // And the two whites are not exclusive with each other.
+    let output = against(&bulb, &addr, &["on", "--cold", "12", "--warm", "34"]).await;
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_shows_a_white_emitter_only_when_it_is_lit() {
+    // A bulb in channel mode reports `c` and `w` on every read, both `0`
+    // unless something set them, so the human line would otherwise carry two
+    // columns that almost never say anything.
+    let bulb = MockBulb::builder()
+        .pilot(serde_json::json!({
+            "state": true, "r": 255, "g": 80, "b": 0, "c": 0, "w": 64,
+            "dimming": 100, "sceneId": 0
+        }))
+        .start()
+        .await;
+    let addr = bulb.addr().to_string();
+
+    let line = String::from_utf8(against(&bulb, &addr, &["status"]).await.stdout).expect("utf-8");
+    assert_eq!(line.trim(), "on  rgb 255,80,0  warm 64  100%");
+
+    // `--json` renders whatever the bulb reported, lit or not.
+    let json = stdout_json(&against(&bulb, &addr, &["--json", "status"]).await);
+    assert_eq!(json["result"]["c"], 0);
+    assert_eq!(json["result"]["w"], 64);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_scene_is_named_or_numbered_and_matched_leniently() {
     let bulb = MockBulb::start().await;
     let addr = bulb.addr().to_string();
@@ -637,6 +748,16 @@ async fn asking_a_bulb_for_what_it_has_no_hardware_for_names_its_class() {
         bulb.requests().iter().all(|raw| !raw.contains("setPilot")),
         "{:?}",
         bulb.requests()
+    );
+
+    // The white emitters are gated the same way and named separately, since
+    // "cannot show a colour" is not what was asked for.
+    let output = against(&bulb, &addr, &["on", "--warm", "64"]).await;
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).expect("utf-8");
+    assert!(
+        stderr.contains("cannot be given raw white channels"),
+        "{stderr}"
     );
 }
 
