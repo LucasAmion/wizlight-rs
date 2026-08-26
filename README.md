@@ -260,14 +260,23 @@ Or with Homebrew, on macOS and Linux:
 $ brew install LucasAmion/tap/wizlight
 ```
 
+Or, if you already have [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall),
+which fetches the same prebuilt archives instead of compiling:
+
+```console
+$ cargo binstall wizlight --version 0.1.0-alpha.3
+```
+
 Binaries are built for macOS (Apple Silicon and Intel), Linux (x86-64 and
 arm64) and Windows (x86-64). The Linux builds are statically linked against
 musl, so they carry no glibc requirement and run on Alpine as happily as on
-Debian.
+Debian. On a glibc system `binstall` looks for a gnu build first and falls back
+to the musl one, so it finds these.
 
 From source, with a Rust toolchain, the version has to be spelled out.
 `cargo install` resolves `*`, and `*` does not match a prerelease, so the bare
-form fails outright rather than finding the alpha:
+form fails outright rather than finding the alpha — the same applies to
+`cargo binstall` above, which resolves the version the same way:
 
 ```console
 $ cargo install wizlight
