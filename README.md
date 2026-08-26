@@ -44,11 +44,11 @@ Anything that good is worth an application deciding for itself.
 
 ```toml
 [dependencies]
-wizlight = { version = "0.1.0-alpha.2", default-features = false }
+wizlight = { version = "0.1.0-alpha.3", default-features = false }
 ```
 
 The prerelease has to be spelled out in full: a plain `"0.1"` requirement does
-not match `0.1.0-alpha.2`, and will keep doing nothing until `0.1.0` ships.
+not match `0.1.0-alpha.3`, and will keep doing nothing until `0.1.0` ships.
 
 **`default-features = false` matters.** The `cli` feature is on by default so
 that `cargo install wizlight` produces a working binary, and it pulls in `clap`,
@@ -282,7 +282,7 @@ form fails outright rather than finding the alpha — the same applies to
 $ cargo install wizlight
 error: could not find `wizlight` in registry `crates-io` with version `*`
 
-$ cargo install wizlight --version 0.1.0-alpha.2
+$ cargo install wizlight --version 0.1.0-alpha.3
 ```
 
 Plain `cargo install wizlight` starts working when `0.1.0` ships.

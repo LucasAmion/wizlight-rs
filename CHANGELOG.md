@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] — 2026-08-26
+
+The alpha that changes how the CLI is installed rather than what it does: there
+is no library or protocol change here. Getting `wizlight` no longer requires a
+Rust toolchain and a from-source build.
+
 ### Added
 
 - **Prebuilt binaries on every release**, for macOS (Apple Silicon and Intel),
@@ -326,6 +332,7 @@ is only reachable by asking for `0.1.0-alpha.1` exactly.
   error explaining that.
 
 [light-modes]: https://docs.pro.wizconnected.com/#light-modes
-[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.2...HEAD
+[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.3...HEAD
+[0.1.0-alpha.3]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.1
