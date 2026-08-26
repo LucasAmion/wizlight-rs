@@ -14,7 +14,7 @@ readme = "README.md"
 # Repository infrastructure is meaningless to someone vendoring the crate. The
 # test suite stays in: it is small, and the mock bulb it drives is the only
 # executable description of the protocol we have.
-exclude = [".github/", ".gitignore", "deny.toml"]
+exclude = [".github/", ".gitignore", "deny.toml", "dist-workspace.toml"]
 repository = "https://github.com/LucasAmion/wizlight-rs"
 homepage = "https://github.com/LucasAmion/wizlight-rs"
 documentation = "https://docs.rs/wizlight"
@@ -87,3 +87,8 @@ tokio = { version = "1.53.1", default-features = false, features = [
     "rt-multi-thread",
     "time",
 ] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

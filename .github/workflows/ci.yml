@@ -91,6 +91,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo publish --dry-run --all-features
 
+  # release.yml is generated from dist-workspace.toml, not hand-written. Editing
+  # the config without regenerating would silently keep shipping the previous
+  # workflow, so the two are checked against each other on every run.
+  #
+  # The version below must match `cargo-dist-version` in dist-workspace.toml.
+  # A mismatch is caught here rather than silently reformatting the workflow:
+  # a different dist generates a different file, so --check fails.
+  dist:
+    name: dist workflow is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install dist
+        # bash for pipefail, so a failed curl is not swallowed by sh
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      - run: dist generate --check
+
   deny:
     name: licences + advisories
     runs-on: ubuntu-latest
