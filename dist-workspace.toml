@@ -1,0 +1,61 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.32.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "homebrew"]
+# Target platforms to build apps for (Rust target-triple syntax)
+#
+# Linux is musl rather than gnu on purpose. A gnu binary inherits the build
+# host's glibc as a hard floor — 2.35 on ubuntu-22.04 — which excludes RHEL 9 and
+# its derivatives (2.34), Debian 11 and Ubuntu 20.04 (2.31), Amazon Linux 2023
+# (2.34), and Alpine entirely. Nothing here pays the usual price for musl: there
+# are no C dependencies, and no hostname is ever resolved, so static musl's lack
+# of NSS plugins cannot matter. That last point expires the day a `.local`
+# hostname becomes a valid target — nss-mdns would not work.
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+]
+# A GitHub repo to push Homebrew formulas to
+tap = "LucasAmion/homebrew-tap"
+# Path that installers should place binaries in.
+#
+# CARGO_HOME, so that the installer, `cargo install` and `cargo binstall` all
+# write to the same place. Installing by one route after another then replaces
+# the binary instead of leaving two different versions of `wizlight` on PATH,
+# shadowing each other by directory order.
+install-path = "CARGO_HOME"
+# Run the test suite and a packaging dry-run before anything is built or
+# published. dist checks that the tag matches a package version, but nothing
+# otherwise stops a release being cut from a commit CI never saw.
+plan-jobs = ["./verify"]
+# Publish jobs to run in CI.
+#
+# `./publish-crates` is a local reusable workflow rather than a builtin: dist has
+# no crates.io publisher. It has to exist because generating this workflow
+# overwrote the hand-written one that published the crate.
+publish-jobs = ["homebrew", "./publish-crates"]
+# Custom publish jobs default to `{ id-token = "write", packages = "write" }`,
+# and overriding replaces that set rather than adding to it. `contents = "read"`
+# is what actions/checkout needs; without it the job requests more than the
+# caller granted, and GitHub kills the entire release run at startup rather than
+# failing that one job. `packages` is dropped because nothing here uses it.
+github-custom-job-permissions = { "publish-crates" = { id-token = "write", contents = "read" } }
+# Publish prereleases too.
+#
+# Every release so far is an alpha whose whole purpose is to exercise the release
+# path. Left at the default, the Homebrew job would skip on every one of them and
+# the tap would stay unproven until 0.1.0. Revisit once 0.1.0 is out: after that,
+# a prerelease moving the formula is probably not wanted.
+publish-prereleases = true
+# Whether to install an updater program
+install-updater = false

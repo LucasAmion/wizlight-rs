@@ -236,9 +236,47 @@ is how long a scan lasts. The CLI is deliberately more patient than the
 library's default: a bulb at the far end of a flat has a round trip past a
 second.
 
-Installing it needs the version spelled out. `cargo install` resolves `*`, and
-`*` does not match a prerelease, so the bare form fails outright rather than
-finding the alpha:
+### Installing
+
+From `0.1.0-alpha.3` onward each release carries prebuilt binaries, so a Rust
+toolchain is not a prerequisite. Substitute the newest tag from the
+[releases page](https://github.com/LucasAmion/wizlight-rs/releases) — the usual
+`releases/latest/download/…` URL cannot be used yet, because GitHub does not
+count a prerelease as the latest release.
+
+```console
+$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-alpha.3/wizlight-installer.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```console
+> irm https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-alpha.3/wizlight-installer.ps1 | iex
+```
+
+Or with Homebrew, on macOS and Linux:
+
+```console
+$ brew install LucasAmion/tap/wizlight
+```
+
+Or, if you already have [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall),
+which fetches the same prebuilt archives instead of compiling:
+
+```console
+$ cargo binstall wizlight --version 0.1.0-alpha.3
+```
+
+Binaries are built for macOS (Apple Silicon and Intel), Linux (x86-64 and
+arm64) and Windows (x86-64). The Linux builds are statically linked against
+musl, so they carry no glibc requirement and run on Alpine as happily as on
+Debian. On a glibc system `binstall` looks for a gnu build first and falls back
+to the musl one, so it finds these.
+
+From source, with a Rust toolchain, the version has to be spelled out.
+`cargo install` resolves `*`, and `*` does not match a prerelease, so the bare
+form fails outright rather than finding the alpha — the same applies to
+`cargo binstall` above, which resolves the version the same way:
 
 ```console
 $ cargo install wizlight
@@ -248,6 +286,17 @@ $ cargo install wizlight --version 0.1.0-alpha.2
 ```
 
 Plain `cargo install wizlight` starts working when `0.1.0` ships.
+
+#### macOS: "cannot be verified"
+
+Only if you download an archive from the releases page with a **browser**. The
+warning comes from the `com.apple.quarantine` attribute, which browsers set and
+`curl`, Homebrew and `cargo` do not — so the commands above never trigger it.
+To clear it:
+
+```console
+$ xattr -d com.apple.quarantine ./wizlight
+```
 
 ## Compatibility
 
