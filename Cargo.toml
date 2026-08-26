@@ -3,7 +3,7 @@ name = "wizlight"
 # Alphas until the M1 surface is complete. Publishing them keeps the release
 # workflow, crates.io trusted publishing and the docs.rs build exercised, none
 # of which can be set up or tested before the crate exists.
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2024"
 # Floor is set by clap 4.6 and by edition 2024; both need 1.85.
 rust-version = "1.85"

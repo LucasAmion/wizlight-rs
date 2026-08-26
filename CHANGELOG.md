@@ -7,8 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] — 2026-08-25
+
+The alpha where the CLI stopped being a scaffold. Every everyday command
+works; `watch` and `bench` wait on the push listener and the streaming write
+path. The library gained the typed pilot surface, model parsing and the scene
+table.
+
 ### Added
 
+- **CLI: the everyday command surface.** `discover`, `status`, `info`, `on`,
+  `off`, `toggle`, `set` and `scenes`, each honouring `--json` and `--all`.
+- **CLI: `<target>` is an IP address or a MAC.** A MAC is resolved by a scan
+  that stops as soon as that bulb answers — about 100 ms on the hardware here —
+  rather than running the full window. The MAC is the form worth using: DHCP
+  moves a bulb's address without warning, and it is the only stable identity the
+  protocol exposes. `98:77:d5:23:0f:0a`, `9877D5230F0A` and `9877d5230f0a` are
+  one bulb, and an address may carry a port.
+- **CLI: `--all`** replaces the target and fans out to every bulb a scan finds,
+  concurrently. One bulb failing never aborts the others: it is reported next to
+  them, and its presence is what makes the exit code non-zero.
+- **CLI: a documented `--json` contract.** One envelope for both outcomes —
+  `ok`, `command`, `target`, then `result` on success or `error` on failure.
+  Under `--all`, `result` is a list of per-bulb objects carrying the same `ok`.
+- **CLI: exit codes `3` and `4`** — nothing answered to the target that was
+  named, and a bulb that was found and then stopped answering. Separate because
+  they call for different reactions: re-scan, or retry.
+- **CLI: `--wait`**, how long a scan lasts, defaulting to the measured
+  `DEFAULT_WAIT`. Both durations accept fractions and reject negatives at parse
+  time.
+- CLI: colour can be given as `--rgb`, `--hsv`, `--kelvin` or `--scene`,
+  mutually exclusive at parse time rather than at run time. HSV is converted
+  client-side because the protocol has none; its `V` scales the colour channels
+  and is not the bulb's own `dimming`, which stays `--brightness`.
+- CLI: `--scene` takes an id or a name, matched ignoring case and punctuation,
+  and checked twice — against the ids the hardware will actually play, and
+  against the class of the bulb in front of it.
+- CLI: asking a bulb for something it has no hardware for fails naming its
+  class. The bulb will not refuse it: measured, it answers `success` for
+  parameters it has nothing to apply to, so without the check the CLI would
+  report success for a command that did nothing. It costs a `bulb_type()` round
+  trip before any write that asks for colour.
 - `Scene`, `Category` and `Adjustable`: the scene table — 40 light modes with
   ids, names, per-class availability, the colour temperature the white ones run
   at, and per scene whether `speed` and `dimming` do anything. `Scene::all` is a
@@ -64,6 +103,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI: a bare `wizlight` is a usage error (exit 2) rather than a success that
   happens to print help. `main` returns an `ExitCode` so the code and the
   rendered message are decided in one place.
+- CLI: `--timeout` now means how long to wait for **each** reply before
+  retrying, and it is honoured. Three attempts of two seconds, rather than the
+  library's 500 ms: that default is measured at close range, and the same bulb
+  further off has a round trip past a second.
+- CLI: `--broadcast` takes an address with the port optional, and repeats — one
+  per subnet is what a multi-homed host needs. It is also how the test suite
+  aims a scan at a mock bulb on loopback instead of at whatever network the
+  machine is on.
+- CLI: **`-h` and `--help` no longer print the same thing.** That held only
+  while every flag fitted on one line; `--broadcast` needs a second paragraph
+  about the multi-homed case, and telling only the long form is what the two
+  lengths are for. Neither leaks rustdoc, and both list every subcommand.
 
 ### Fixed
 
@@ -105,6 +156,19 @@ inherited from `pywizlight` turned out to be wrong.
   the scene and its speed intact afterwards. Brightness can be modulated
   underneath a scene, at least to 10 Hz — except on the three scenes that ignore
   `dimming` entirely.
+- **`setState` turns an off bulb on**, exactly as `setPilot` does. Confirmed
+  again while testing the CLI, on the same firmware. `set` exists because the
+  method does; it carries no promise of leaving the power state alone, and its
+  help text does not imply one.
+- **A fan-out costs the full scan window.** Ten `--all` runs took 5.1–5.2 s
+  each, of which about 0.1 s was the two bulbs answering. Nothing tells us the
+  last bulb has replied, so `--wait` is the only lever. Reporting bulbs as they
+  arrive is the fix, and the library already supports it —
+  [`Discovery::stream`] does exactly that; the CLI is what buffers.
+- **The `moduleName` is all the identity the protocol offers.** There is no
+  user-facing name anywhere in `getSystemConfig`: the friendly name lives in the
+  vendor's cloud account, not on the bulb. `discover` lists model and firmware
+  because that is what exists.
 
 ### Notes on the pilot surface
 
@@ -195,11 +259,24 @@ golden table and the measurements are kept in the workspace repo.
 
 ### Known gaps
 
-- No streaming path and no `syncPilot` push listener.
+- No rate-limited streaming write path, and no `syncPilot` push listener. The
+  two CLI commands that need them — `watch` and `bench` — still exit 1 saying
+  so.
 - `getPilot` per-head reads are not implemented. `devices` uses a one-based
   convention for writes and a zero-based one for reads, and only the former is
   modelled.
-- The `wizlight` binary still stubs the command runner.
+- **Discovery does not derive the broadcast address from local interfaces.** The
+  all-subnets default reaches every bulb on the directly attached network, which
+  is where this has been tested; a host on several networks needs `--broadcast`
+  once per subnet.
+- **Discovery reports arrivals, never departures.** A bulb is announced when it
+  answers and never withdrawn, and "gone" is indistinguishable from "missed
+  several broadcasts", which this hardware does routinely. Anything tracking
+  presence needs to infer it from failed writes.
+- The CLI buffers a scan rather than printing bulbs as they answer, so every
+  `discover` and every `--all` costs the full `--wait`.
+
+[`Discovery::stream`]: https://docs.rs/wizlight/latest/wizlight/struct.Discovery.html#method.stream
 
 ## [0.1.0-alpha.1] — 2026-08-14
 
@@ -232,5 +309,6 @@ is only reachable by asking for `0.1.0-alpha.1` exactly.
   error explaining that.
 
 [light-modes]: https://docs.pro.wizconnected.com/#light-modes
-[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.1...HEAD
+[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.1
