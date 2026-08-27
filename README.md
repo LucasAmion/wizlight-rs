@@ -35,7 +35,8 @@ real-time control, and it is the protocol layer underneath
 **Not planned: RGB ↔ RGB+CW conversion.** A WiZ RGB bulb has five emitters, and
 deciding how to spread a colour across them is a judgement call, not a protocol
 detail. This crate lets you send `r`/`g`/`b`, or all five channels, and holds no
-opinion about which — see [`PilotBuilder`]. `pywizlight`'s "trapezoid" was ported
+opinion about which — see [`PilotBuilder`], and `--cold` / `--warm` on the CLI,
+which reaches the same five emitters. `pywizlight`'s "trapezoid" was ported
 and measured against raw RGB on hardware before being dropped: it renders a
 near-white better, ties or loses elsewhere, and cannot reach some colours at all.
 Anything that good is worth an application deciding for itself.
@@ -176,6 +177,7 @@ $ wizlight status 9877d5230f0a
 on  scene Warm white (11)  2700 K  100%  -49 dBm
 
 $ wizlight on 9877d5230f0a --rgb 255,80,0 --brightness 60
+$ wizlight on 9877d5230f0a --rgb 255,80,0 --warm 64   # the fifth emitter too
 $ wizlight on --all --scene "deep dive" --speed 120
 $ wizlight off --all
 ```
@@ -191,7 +193,7 @@ soon as that bulb answers.
 | `status <target>` | What the bulb says it is doing |
 | `info <target>` | Model, firmware, class, Kelvin range and what it can do |
 | `scenes <target>` | Only the scenes that bulb's class actually plays |
-| `on` / `off` / `toggle` | `on` also takes `--rgb`, `--hsv`, `--kelvin`, `--scene`, `--speed`, `--brightness` |
+| `on` / `off` / `toggle` | `on` also takes `--rgb`, `--hsv`, `--cold`, `--warm`, `--kelvin`, `--scene`, `--speed`, `--brightness` |
 | `set <target>` | The same options, sent as `setState`. It does **not** leave a bulb that was off alone: measured on `ESP25_SHRGB_01` fw 1.38.0, `setState` turns it on exactly as `setPilot` does |
 | `watch` / `bench` | Not yet — they wait on the push listener and the streaming write path |
 
@@ -205,10 +207,20 @@ expect, `--wait 1` is plenty on a quiet network: both bulbs here answer a
 broadcast in about 100 ms.
 
 The ways of naming a colour are mutually exclusive, and clap rejects two of them
-before anything is sent. `--scene` takes an id or a name, matched ignoring case
-and punctuation. Asking a bulb for something it has no hardware for — colour on
-a dimmable white — fails with a message naming its class, because the bulb will
-not refuse it: it answers `success` and does nothing.
+before anything is sent. `--cold` and `--warm` are the exception, and compose
+with `--rgb` or `--hsv`: the white emitters are the other half of the same
+colour mode, not a competing one. `--scene` takes an id or a name, matched
+ignoring case and punctuation. Asking a bulb for something it has no hardware
+for — colour on a dimmable white — fails with a message naming its class,
+because the bulb will not refuse it: it answers `success` and does nothing.
+
+**A colour write sets all five emitters at once.** Measured on `ESP25_SHRGB_01`
+fw 1.38.0: the channels you leave out go dark, so `--warm 128` on its own means
+white *only*, and there is no way to add a white to a colour already showing —
+send them together. For the same reason a colour with every channel at zero is
+refused here rather than sent: the bulb discards it, and if anything else rides
+along in the request (as `state` does on `on`) it answers `success` having done
+nothing. Use `off` to go dark and `--brightness` to go dim.
 
 ### Output
 

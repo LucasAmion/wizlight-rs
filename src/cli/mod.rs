@@ -601,10 +601,18 @@ fn init_logging(verbose: u8, json: bool) {
 #[must_use]
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
-    // The one rule clap's own derive cannot state, reported the way clap
-    // would have: `set` with nothing to set exits 2 like any other misuse.
+    // The rules clap's own derive cannot state, reported the way clap would
+    // have: both exit 2 like any other misuse. `set` with nothing to set is
+    // one; a colour with every channel at zero is the other, and that one
+    // applies to `on` as well, where the bulb would answer `success` having
+    // quietly ignored it.
     if let Command::Set(write) = &cli.command {
         if let Err(err) = write.options.require_something(&mut Cli::command()) {
+            err.exit();
+        }
+    }
+    if let Command::On(write) | Command::Set(write) = &cli.command {
+        if let Err(err) = write.options.require_something_lit(&mut Cli::command()) {
             err.exit();
         }
     }

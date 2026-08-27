@@ -15,6 +15,18 @@ pub struct StateOptions {
     #[command(flatten)]
     pub colour: ColourOptions,
 
+    /// Cold white emitter, 0-255. Send with `--rgb` or `--hsv`, or alone for
+    /// white only — the channels left out go dark.
+    #[arg(long, value_name = "N", value_parser = channel)]
+    #[arg(conflicts_with_all = ["kelvin", "scene"])]
+    pub cold: Option<Channel>,
+
+    /// Warm white emitter, 0-255. Send with `--rgb` or `--hsv`, or alone for
+    /// white only — the channels left out go dark.
+    #[arg(long, value_name = "N", value_parser = channel)]
+    #[arg(conflicts_with_all = ["kelvin", "scene"])]
+    pub warm: Option<Channel>,
+
     /// Scene animation speed, 10-200.
     #[arg(long, value_name = "SPEED", value_parser = speed)]
     pub speed: Option<Speed>,
@@ -30,6 +42,11 @@ pub struct StateOptions {
 /// before anything is sent. [`PilotBuilder`] refuses the same combination, but
 /// it can only do so once the command is already running, and its message has
 /// no `--flag` in it to point at.
+///
+/// The white emitters are deliberately *not* in here. `r`/`g`/`b` and `c`/`w`
+/// are halves of one colour mode rather than two modes, so `--cold` and
+/// `--warm` live beside this group and conflict only with `--kelvin` and
+/// `--scene` — see [`StateOptions`].
 #[derive(Args, Debug, Clone, PartialEq, Eq, Default)]
 #[group(multiple = false)]
 pub struct ColourOptions {
@@ -72,8 +89,54 @@ impl StateOptions {
         if self.is_empty() {
             return Err(command.error(
                 clap::error::ErrorKind::MissingRequiredArgument,
-                "`set` needs something to set: one of --rgb, --hsv, --kelvin, --scene, --speed \
-                 or --brightness",
+                "`set` needs something to set: one of --rgb, --hsv, --cold, --warm, --kelvin, \
+                 --scene, --speed or --brightness",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Rejects a colour with every channel at zero, as a usage error.
+    ///
+    /// Measured on `ESP25_SHRGB_01` fw 1.38.0: `r`/`g`/`b`/`c`/`w` are one
+    /// instruction, and the bulb honours it only if a channel is non-zero. An
+    /// all-zero one is discarded — and `on --rgb 0,0,0` is the shape that
+    /// makes this worth catching, because there the request also carries
+    /// `state`, so the bulb answers `success` having ignored the colour
+    /// entirely. `set --rgb 0,0,0` at least fails, with the bulb's own
+    /// `-32600` and no mention of a flag.
+    ///
+    /// [`PilotBuilder`] refuses the same thing, for callers that come at it
+    /// from the library; this is the version that can name what you typed.
+    ///
+    /// # Errors
+    ///
+    /// A clap error naming the flags that are all zero.
+    pub fn require_something_lit(&self, command: &mut clap::Command) -> Result<(), clap::Error> {
+        let given: Vec<&str> = [
+            self.colour.rgb.map(|_| "--rgb"),
+            self.colour.hsv.map(|_| "--hsv"),
+            self.cold.map(|_| "--cold"),
+            self.warm.map(|_| "--warm"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let dark = self
+            .channels()
+            .is_none_or(|rgb| rgb.iter().all(|c| c.get() == 0))
+            && self.cold.is_none_or(|c| c.get() == 0)
+            && self.warm.is_none_or(|w| w.get() == 0);
+
+        if !given.is_empty() && dark {
+            return Err(command.error(
+                clap::error::ErrorKind::InvalidValue,
+                format!(
+                    "{} asks for no light at all, and the bulb discards a colour with every \
+                     channel at zero: use `off` to turn it off, or --brightness to dim it",
+                    given.join(" and ")
+                ),
             ));
         }
         Ok(())
@@ -82,6 +145,13 @@ impl StateOptions {
     /// The colour triple, however it was spelled.
     fn channels(&self) -> Option<[Channel; 3]> {
         self.colour.rgb.or(self.colour.hsv)
+    }
+
+    /// The white emitters that were asked for, labelled for output.
+    fn whites(&self) -> impl Iterator<Item = (&'static str, Channel)> {
+        [("cold", self.cold), ("warm", self.warm)]
+            .into_iter()
+            .filter_map(|(label, value)| Some((label, value?)))
     }
 
     /// Adds everything that was asked for to a builder.
@@ -93,6 +163,12 @@ impl StateOptions {
     pub fn apply(&self, mut builder: PilotBuilder) -> PilotBuilder {
         if let Some([r, g, b]) = self.channels() {
             builder = builder.rgb(r, g, b);
+        }
+        if let Some(c) = self.cold {
+            builder = builder.cold_white(c);
+        }
+        if let Some(w) = self.warm {
+            builder = builder.warm_white(w);
         }
         if let Some(kelvin) = self.colour.kelvin {
             builder = builder.temp(kelvin);
@@ -134,6 +210,18 @@ impl StateOptions {
 
         if self.channels().is_some() && !features.color {
             return Err(refuse("show a colour"));
+        }
+        // Gated on `color` rather than on a white-emitter count, for two
+        // reasons. `nowc` cannot carry the check: both measured
+        // `ESP25_SHRGB_01` report `nowc: 1` and yet answer visibly
+        // differently to `c` and to `w`. And raw channels are the colour
+        // mode, so the classes known to honour them are the colour ones. A
+        // tunable white bulb is the interesting case — it is the class that
+        // has two white emitters, and it may well take `c`/`w` directly —
+        // but none has been on hand to try, so it is refused rather than
+        // guessed at.
+        if self.whites().next().is_some() && !features.color {
+            return Err(refuse("be given raw white channels"));
         }
         if self.colour.kelvin.is_some() && !features.color_tmp {
             return Err(refuse("set a colour temperature"));
@@ -250,6 +338,11 @@ fn written(on: bool, options: &StateOptions) -> Report {
     if let Some([r, g, b]) = options.channels() {
         parts.push(format!("rgb {},{},{}", r.get(), g.get(), b.get()));
     }
+    // Zero is worth echoing here, unlike in `status`: this describes what was
+    // asked for, and `--warm 0` is a request to switch that emitter off.
+    for (label, value) in options.whites() {
+        parts.push(format!("{label} {}", value.get()));
+    }
     if let Some(kelvin) = options.colour.kelvin {
         parts.push(format!("{} K", kelvin.get()));
     }
@@ -269,6 +362,14 @@ fn written(on: bool, options: &StateOptions) -> Report {
     let mut json = json!({ "state": on });
     if let Some([r, g, b]) = options.channels() {
         json["rgb"] = json!([r.get(), g.get(), b.get()]);
+    }
+    // Keyed as the bulb keys them, so a reader can line the request up against
+    // the `c`/`w` a later `status` reports.
+    if let Some(c) = options.cold {
+        json["c"] = json!(c.get());
+    }
+    if let Some(w) = options.warm {
+        json["w"] = json!(w.get());
     }
     if let Some(kelvin) = options.colour.kelvin {
         json["temp"] = json!(kelvin.get());
@@ -310,8 +411,22 @@ fn describe_pilot(pilot: &Pilot) -> String {
             Some(scene) => format!("scene {} ({id})", scene.name()),
             None => format!("scene {id}"),
         });
-    } else if let Some((r, g, b)) = pilot.rgb() {
-        parts.push(format!("rgb {r},{g},{b}"));
+    } else {
+        // Only what is lit. Measured on `ESP25_SHRGB_01` fw 1.38.0, a bulb in
+        // channel mode reports all five channels on every read, and the ones
+        // nothing set read `0` — a white-only bulb reports `rgb 0,0,0` and a
+        // plain colour reports `c` and `w` at zero. Printing those would add
+        // columns that say nothing, so the line carries the emitters that are
+        // actually on. `--json` renders whatever the bulb reported, either
+        // way.
+        if let Some((r, g, b)) = pilot.rgb().filter(|(r, g, b)| (r | g | b) != 0) {
+            parts.push(format!("rgb {r},{g},{b}"));
+        }
+        for (label, value) in [("cold", pilot.c), ("warm", pilot.w)] {
+            if let Some(value) = value.filter(|value| *value != 0) {
+                parts.push(format!("{label} {value}"));
+            }
+        }
     }
     if let Some(temp) = pilot.temp {
         parts.push(format!("{temp} K"));
@@ -339,6 +454,20 @@ fn rgb(input: &str) -> Result<[Channel; 3], String> {
         *channel = Channel::new(value);
     }
     Ok(channels)
+}
+
+/// Parses one channel value, for the flags that take a single emitter.
+///
+/// The whole of `u8` is on the wire, and measured on `ESP25_SHRGB_01` fw
+/// 1.38.0 every value in it is honoured exactly and read back unchanged —
+/// there is no clamp partway up, which the 128 ceiling in `pywizlight`'s
+/// conversion might suggest. That ceiling is the algorithm's, not the
+/// hardware's.
+fn channel(input: &str) -> Result<Channel, String> {
+    input
+        .parse::<u8>()
+        .map(Channel::new)
+        .map_err(|_| format!("`{input}` is not a channel value 0-255"))
 }
 
 /// Parses `H,S,V` and converts it, because the protocol has no HSV.
