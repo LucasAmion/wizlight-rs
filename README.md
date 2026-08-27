@@ -209,11 +209,18 @@ broadcast in about 100 ms.
 The ways of naming a colour are mutually exclusive, and clap rejects two of them
 before anything is sent. `--cold` and `--warm` are the exception, and compose
 with `--rgb` or `--hsv`: the white emitters are the other half of the same
-colour mode, not a competing one. Either may also be sent on its own. `--scene`
-takes an id or a name, matched ignoring case and punctuation. Asking a bulb for
-something it has no hardware for — colour on a dimmable white — fails with a
-message naming its class, because the bulb will not refuse it: it answers
-`success` and does nothing.
+colour mode, not a competing one. `--scene` takes an id or a name, matched
+ignoring case and punctuation. Asking a bulb for something it has no hardware
+for — colour on a dimmable white — fails with a message naming its class,
+because the bulb will not refuse it: it answers `success` and does nothing.
+
+**A colour write sets all five emitters at once.** Measured on `ESP25_SHRGB_01`
+fw 1.38.0: the channels you leave out go dark, so `--warm 128` on its own means
+white *only*, and there is no way to add a white to a colour already showing —
+send them together. For the same reason a colour with every channel at zero is
+refused here rather than sent: the bulb discards it, and if anything else rides
+along in the request (as `state` does on `on`) it answers `success` having done
+nothing. Use `off` to go dark and `--brightness` to go dim.
 
 ### Output
 

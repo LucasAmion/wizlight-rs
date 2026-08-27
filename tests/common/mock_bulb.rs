@@ -28,6 +28,17 @@
 //!   usable range comes from `getModelConfig`.
 //! - Colour, colour temperature and scene are mutually exclusive: setting one
 //!   clears the others.
+//! - `r`/`g`/`b`/`c`/`w` are **one instruction, not five fields**. A write
+//!   replaces all five, so the channels it leaves out go dark; and the group
+//!   counts only if something in it is non-zero. An all-zero group is
+//!   discarded whole — the bulb keeps showing what it was showing and does not
+//!   even come on — which is why `{"w":0}` draws `-32600` (nothing is left in
+//!   the request) while `{"state":true,"w":0}` succeeds and quietly does
+//!   nothing to the emitters.
+//! - A channel is **truncated to its low byte** rather than range-checked:
+//!   `300` reads back as `44`, `-1` as `255`. This is also all there is to
+//!   `256` being refused — it truncates to `0`, and the rule above does the
+//!   rest.
 //! - A `syncPilot` push can be emitted *before* the reply to the request that
 //!   caused it. Off by default; see [`MockBulb::push_before_ack`].
 //! - A `setPilot` with **no `params` key** is `-32602`, while one with an
@@ -709,11 +720,14 @@ fn apply(
             "state" => {
                 value.as_bool().ok_or_else(invalid)?;
             }
+            // Measured: the wire has no range check here at all. Anything
+            // outside a byte is truncated to its low eight bits and accepted —
+            // 300 reads back as 44, 1000 as 232, 65535 and -1 as 255. Which is
+            // also the whole explanation for 256 being refused: it truncates
+            // to 0, and an all-zero channel group is discarded, leaving a
+            // request with nothing in it. See the group rule below.
             "r" | "g" | "b" | "c" | "w" => {
-                let v = value.as_i64().ok_or_else(invalid)?;
-                if !(0..=255).contains(&v) {
-                    return Err(invalid());
-                }
+                value.as_i64().ok_or_else(invalid)?;
             }
             // Measured: 200 comes back as success and is clamped to 100.
             "dimming" => {
@@ -757,10 +771,27 @@ fn apply(
     }
 
     let colour = ["r", "g", "b", "c", "w"];
+    // Measured: the five channels are one instruction, honoured only if
+    // something in it is lit. An all-zero group is discarded whole — the bulb
+    // keeps showing what it was showing, and does not even come on — and a
+    // request left with nothing else in it is refused as an empty one. So
+    // `{"w":0}` is -32600 while `{"state":true,"w":0}` succeeds, turns the
+    // bulb on, and leaves the colour it was already showing alone.
+    let sent: Vec<&str> = colour
+        .iter()
+        .copied()
+        .filter(|key| params.contains_key(*key))
+        .collect();
+    let channels = !sent.is_empty()
+        && sent
+            .iter()
+            .any(|key| byte(params.get(*key).unwrap_or(&Value::Null)) != 0);
+    if !sent.is_empty() && !channels && params.len() == sent.len() {
+        return Err((-32600, "Invalid Request".to_owned()));
+    }
+
     let lit = pilot.get("state").and_then(Value::as_bool).unwrap_or(false);
-    let activating = colour.iter().any(|k| params.contains_key(*k))
-        || params.contains_key("temp")
-        || params.contains_key("sceneId");
+    let activating = channels || params.contains_key("temp") || params.contains_key("sceneId");
 
     // Measured: a bulb that is off ignores anything that does not either name a
     // new state or imply one. `{"dimming":55}` sent to an off bulb reports
@@ -773,11 +804,14 @@ fn apply(
         pilot.insert("state".into(), json!(true));
     }
 
-    if colour.iter().any(|k| params.contains_key(*k)) {
+    // Measured: a channel write replaces all five, so the ones it leaves out
+    // go dark rather than staying as they were. `{"w":128}` on a bulb showing
+    // 255,80,0 leaves it showing nothing but the warm white.
+    if channels {
         pilot.remove("temp");
         pilot.insert("sceneId".into(), json!(0));
         for key in colour {
-            pilot.entry(key.to_string()).or_insert(json!(0));
+            pilot.insert(key.to_string(), json!(0));
         }
     }
     if params.contains_key("temp") {
@@ -796,7 +830,13 @@ fn apply(
     }
 
     for (key, value) in params {
+        // A discarded channel group leaves no trace: not the values, and not
+        // the mode switch either.
+        if colour.contains(&key.as_str()) && !channels {
+            continue;
+        }
         let value = match (key.as_str(), kelvin_range) {
+            ("r" | "g" | "b" | "c" | "w", _) => json!(byte(value)),
             ("dimming", _) => json!(value.as_i64().unwrap_or(100).clamp(1, 100)),
             // Measured on ESP25_SHRGB_01 fw 1.38.0, whose reported cctRange is
             // 2200-6500: `temp` is clamped into that range in both directions
@@ -886,6 +926,12 @@ fn reply(latency: Option<Duration>, body: Value) -> Reaction {
         reply: Some(body.to_string().into_bytes()),
         ..Reaction::default()
     }
+}
+
+/// A channel value as the firmware reads it: the low eight bits, so 300 is 44
+/// and -1 is 255. Measured; see the validation loop in [`apply`].
+fn byte(value: &Value) -> i64 {
+    value.as_i64().unwrap_or(0).rem_euclid(256)
 }
 
 fn error(method: &str, code: i64, message: &str) -> Value {

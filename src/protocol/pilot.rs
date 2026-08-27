@@ -17,7 +17,8 @@ use crate::protocol::Request;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ColourMode {
     /// Raw channels. `r`/`g`/`b` and `c`/`w` compose, and either half may be
-    /// sent without the other.
+    /// sent without the other — though the half left out goes dark, since the
+    /// bulb takes all five as one instruction.
     Channels {
         r: Option<Channel>,
         g: Option<Channel>,
@@ -63,6 +64,25 @@ impl ColourMode {
                 w: None
             }
         )
+    }
+
+    /// Whether a channel write has anything lit in it.
+    ///
+    /// Measured on `ESP25_SHRGB_01` fw 1.38.0: the five channels are one
+    /// instruction, and the bulb honours it only if at least one of them is
+    /// non-zero. An all-zero group is **discarded** — the bulb keeps showing
+    /// whatever it was showing — and a request with nothing else left in it is
+    /// then refused as an empty one, `-32600 Invalid Request`.
+    fn is_dark(self) -> bool {
+        let Self::Channels { r, g, b, c, w } = self else {
+            return false;
+        };
+        let (mut set, mut lit) = (false, false);
+        for channel in [r, g, b, c, w].into_iter().flatten() {
+            set = true;
+            lit |= channel.get() != 0;
+        }
+        set && !lit
     }
 }
 
@@ -185,6 +205,12 @@ impl PilotBuilder {
     /// [`cold_white`](PilotBuilder::cold_white) /
     /// [`warm_white`](PilotBuilder::warm_white).
     ///
+    /// **The channels left out go dark.** Measured on `ESP25_SHRGB_01` fw
+    /// 1.38.0: the five channels are one instruction and a write replaces all
+    /// of them, so this turns off any white the bulb was mixing in. It is not
+    /// a way to change the colour and leave the whites alone — there is no
+    /// such request.
+    ///
     /// Conflicts with [`temp`](PilotBuilder::temp) and
     /// [`scene`](PilotBuilder::scene).
     #[must_use]
@@ -228,6 +254,10 @@ impl PilotBuilder {
 
     /// Sets cold white (`c`), with or without an RGB triple.
     ///
+    /// Without one it is a white-only request: the colour channels are part of
+    /// the same instruction, so leaving them out turns them off. See
+    /// [`rgb`](PilotBuilder::rgb).
+    ///
     /// Conflicts with [`temp`](PilotBuilder::temp) and
     /// [`scene`](PilotBuilder::scene).
     #[must_use]
@@ -239,6 +269,9 @@ impl PilotBuilder {
     }
 
     /// Sets warm white (`w`), with or without an RGB triple.
+    ///
+    /// Without one it is a white-only request, as
+    /// [`cold_white`](PilotBuilder::cold_white) describes.
     ///
     /// Conflicts with [`temp`](PilotBuilder::temp) and
     /// [`scene`](PilotBuilder::scene).
@@ -309,6 +342,20 @@ impl PilotBuilder {
         if self.is_empty() {
             return Err(Error::InvalidParam {
                 message: "pilot params must set at least one field".into(),
+            });
+        }
+
+        // Refused here rather than sent, for the same reason as `speed`
+        // below: the bulb does not always say no. A bare `{"w":0}` is refused
+        // outright, but pair it with `state` or `dimming` and the same
+        // instruction is accepted, discarded, and acknowledged `success` — so
+        // a caller who sent it has no way of learning it did nothing.
+        if self.colour.is_some_and(ColourMode::is_dark) {
+            return Err(Error::InvalidParam {
+                message: "`r`/`g`/`b`/`c`/`w` are all zero, and a channel write with nothing lit \
+                          in it is discarded: to go dark use `state(false)`, and to go dim use \
+                          `dimming`"
+                    .into(),
             });
         }
 
@@ -783,6 +830,39 @@ mod tests {
             .params()
             .unwrap();
         assert_eq!(tuple, separately);
+    }
+
+    #[test]
+    fn a_channel_write_with_nothing_lit_in_it_is_rejected() {
+        // Measured: the bulb discards an all-zero channel group. Sent bare it
+        // draws -32600, and sent with a `state` it is accepted, ignored and
+        // acknowledged `success` — the case that makes refusing it here worth
+        // the trouble, since the caller could never find out otherwise.
+        let dark = [
+            PilotBuilder::new().rgb(Channel::new(0), Channel::new(0), Channel::new(0)),
+            PilotBuilder::new().warm_white(Channel::new(0)),
+            PilotBuilder::new()
+                .state(true)
+                .rgb(Channel::new(0), Channel::new(0), Channel::new(0))
+                .cold_white(Channel::new(0)),
+        ];
+        for builder in dark {
+            let err = builder.set_pilot().unwrap_err();
+            assert!(
+                matches!(&err, Error::InvalidParam { message } if message.contains("all zero")),
+                "{err}"
+            );
+        }
+
+        // One lit channel is enough, and the zeroes beside it are ordinary
+        // values — `{"r":255,"g":80,"b":0}` is the commonest request there is.
+        let lit = PilotBuilder::new()
+            .rgb(Channel::new(0), Channel::new(0), Channel::new(0))
+            .warm_white(Channel::new(1))
+            .params()
+            .unwrap();
+        assert_eq!(lit.r.unwrap().get(), 0);
+        assert_eq!(lit.w.unwrap().get(), 1);
     }
 
     #[test]

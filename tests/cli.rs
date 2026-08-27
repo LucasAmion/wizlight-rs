@@ -569,12 +569,15 @@ async fn the_white_emitters_compose_with_a_colour() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_white_emitter_can_be_sent_on_its_own() {
-    // Which is the reason for two flags rather than one five-value tuple:
-    // `--rgb 0,0,0 --warm 128` is a different request, and would explicitly
-    // zero three channels this one does not mention.
+    // Measured: this is a white-*only* request. The five channels are one
+    // instruction and a write replaces all of them, so the colour goes dark
+    // rather than staying underneath — which is also why the flag pair beats
+    // a five-value tuple, since `--rgb 0,0,0 --warm 128` says the same thing
+    // the long way round.
     let bulb = MockBulb::start().await;
     let addr = bulb.addr().to_string();
 
+    against(&bulb, &addr, &["on", "--rgb", "255,80,0"]).await;
     let output = against(&bulb, &addr, &["set", "--warm", "128"]).await;
     assert_eq!(output.status.code(), Some(0));
 
@@ -583,16 +586,44 @@ async fn a_white_emitter_can_be_sent_on_its_own() {
     assert_eq!(request["params"]["w"], 128);
     assert_eq!(request["params"]["r"], Value::Null);
 
-    // Zero is a value, not an omission: it switches that emitter off, so it
-    // is something to set and it is echoed rather than hidden.
-    let output = against(&bulb, &addr, &["set", "--cold", "0"]).await;
+    let json = stdout_json(&against(&bulb, &addr, &["--json", "status"]).await);
+    assert_eq!(json["result"]["w"], 128);
+    assert_eq!(json["result"]["r"], 0, "the colour it replaced went dark");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_colour_with_nothing_lit_in_it_is_refused_before_it_is_sent() {
+    // Measured on `ESP25_SHRGB_01` fw 1.38.0: an all-zero channel group is
+    // discarded, and the bulb's own answer is no help. `set --warm 0` at
+    // least fails, with a bare -32600 naming nothing; `on --warm 0` carries a
+    // `state` as well, so the bulb answers `success` having ignored the
+    // colour completely. Both are usage errors here instead.
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    for args in [
+        vec!["on", "--rgb", "0,0,0"],
+        vec!["set", "--rgb", "0,0,0"],
+        vec!["on", "--warm", "0"],
+        vec!["on", "--hsv", "120,100,0"],
+        vec!["on", "--cold", "0", "--warm", "0"],
+    ] {
+        let output = against(&bulb, &addr, &args).await;
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8(output.stderr).expect("utf-8");
+        assert!(
+            stderr.contains("asks for no light at all"),
+            "{args:?}: {stderr}"
+        );
+        assert!(bulb.requests().is_empty(), "{args:?} reached the bulb");
+    }
+
+    // One lit channel is enough, and the zeroes beside it are fine.
+    let output = against(&bulb, &addr, &["on", "--rgb", "0,0,0", "--warm", "128"]).await;
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(bulb.last_request().expect("a write")["params"]["c"], 0);
-    assert!(
-        String::from_utf8(output.stdout)
-            .expect("utf-8")
-            .contains("cold 0")
-    );
+    let request = bulb.last_request().expect("a write arrived");
+    assert_eq!(request["params"]["r"], 0);
+    assert_eq!(request["params"]["w"], 128);
 }
 
 #[tokio::test(flavor = "multi_thread")]

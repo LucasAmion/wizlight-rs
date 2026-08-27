@@ -15,12 +15,14 @@ pub struct StateOptions {
     #[command(flatten)]
     pub colour: ColourOptions,
 
-    /// Cold white emitter, 0-255. Composes with `--rgb` or `--hsv`.
+    /// Cold white emitter, 0-255. Send with `--rgb` or `--hsv`, or alone for
+    /// white only — the channels left out go dark.
     #[arg(long, value_name = "N", value_parser = channel)]
     #[arg(conflicts_with_all = ["kelvin", "scene"])]
     pub cold: Option<Channel>,
 
-    /// Warm white emitter, 0-255. Composes with `--rgb` or `--hsv`.
+    /// Warm white emitter, 0-255. Send with `--rgb` or `--hsv`, or alone for
+    /// white only — the channels left out go dark.
     #[arg(long, value_name = "N", value_parser = channel)]
     #[arg(conflicts_with_all = ["kelvin", "scene"])]
     pub warm: Option<Channel>,
@@ -89,6 +91,52 @@ impl StateOptions {
                 clap::error::ErrorKind::MissingRequiredArgument,
                 "`set` needs something to set: one of --rgb, --hsv, --cold, --warm, --kelvin, \
                  --scene, --speed or --brightness",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Rejects a colour with every channel at zero, as a usage error.
+    ///
+    /// Measured on `ESP25_SHRGB_01` fw 1.38.0: `r`/`g`/`b`/`c`/`w` are one
+    /// instruction, and the bulb honours it only if a channel is non-zero. An
+    /// all-zero one is discarded — and `on --rgb 0,0,0` is the shape that
+    /// makes this worth catching, because there the request also carries
+    /// `state`, so the bulb answers `success` having ignored the colour
+    /// entirely. `set --rgb 0,0,0` at least fails, with the bulb's own
+    /// `-32600` and no mention of a flag.
+    ///
+    /// [`PilotBuilder`] refuses the same thing, for callers that come at it
+    /// from the library; this is the version that can name what you typed.
+    ///
+    /// # Errors
+    ///
+    /// A clap error naming the flags that are all zero.
+    pub fn require_something_lit(&self, command: &mut clap::Command) -> Result<(), clap::Error> {
+        let given: Vec<&str> = [
+            self.colour.rgb.map(|_| "--rgb"),
+            self.colour.hsv.map(|_| "--hsv"),
+            self.cold.map(|_| "--cold"),
+            self.warm.map(|_| "--warm"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        let dark = self
+            .channels()
+            .is_none_or(|rgb| rgb.iter().all(|c| c.get() == 0))
+            && self.cold.is_none_or(|c| c.get() == 0)
+            && self.warm.is_none_or(|w| w.get() == 0);
+
+        if !given.is_empty() && dark {
+            return Err(command.error(
+                clap::error::ErrorKind::InvalidValue,
+                format!(
+                    "{} asks for no light at all, and the bulb discards a colour with every \
+                     channel at zero: use `off` to turn it off, or --brightness to dim it",
+                    given.join(" and ")
+                ),
             ));
         }
         Ok(())
@@ -364,14 +412,16 @@ fn describe_pilot(pilot: &Pilot) -> String {
             None => format!("scene {id}"),
         });
     } else {
-        if let Some((r, g, b)) = pilot.rgb() {
+        // Only what is lit. Measured on `ESP25_SHRGB_01` fw 1.38.0, a bulb in
+        // channel mode reports all five channels on every read, and the ones
+        // nothing set read `0` — a white-only bulb reports `rgb 0,0,0` and a
+        // plain colour reports `c` and `w` at zero. Printing those would add
+        // columns that say nothing, so the line carries the emitters that are
+        // actually on. `--json` renders whatever the bulb reported, either
+        // way.
+        if let Some((r, g, b)) = pilot.rgb().filter(|(r, g, b)| (r | g | b) != 0) {
             parts.push(format!("rgb {r},{g},{b}"));
         }
-        // Only when lit. Measured on `ESP25_SHRGB_01` fw 1.38.0, a bulb in
-        // channel mode reports `c` and `w` on every read and both are `0`
-        // unless something set them, so printing them unconditionally would
-        // add two columns that almost always say nothing. `--json` carries
-        // them either way: it renders whatever the bulb reported.
         for (label, value) in [("cold", pilot.c), ("warm", pilot.w)] {
             if let Some(value) = value.filter(|value| *value != 0) {
                 parts.push(format!("{label} {value}"));
@@ -408,9 +458,11 @@ fn rgb(input: &str) -> Result<[Channel; 3], String> {
 
 /// Parses one channel value, for the flags that take a single emitter.
 ///
-/// The whole of `u8` is on the wire. Whether a given bulb does anything
-/// visible with the top of that range is a hardware question and unmeasured;
-/// it is not the parser's to answer.
+/// The whole of `u8` is on the wire, and measured on `ESP25_SHRGB_01` fw
+/// 1.38.0 every value in it is honoured exactly and read back unchanged —
+/// there is no clamp partway up, which the 128 ceiling in `pywizlight`'s
+/// conversion might suggest. That ceiling is the algorithm's, not the
+/// hardware's.
 fn channel(input: &str) -> Result<Channel, String> {
     input
         .parse::<u8>()
