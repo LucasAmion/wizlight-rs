@@ -4,6 +4,7 @@
 mod bulb;
 mod discovery;
 mod error;
+mod stream;
 mod transport;
 
 pub mod protocol;
@@ -22,4 +23,5 @@ pub use protocol::{
     PilotParams, Power, Ratio, Request, Response, Scene, SceneId, Speed, Success, SystemConfig,
     UserConfig,
 };
+pub use stream::{BulbStream, DEFAULT_STREAM_INTERVAL, StreamConfig, StreamCounters};
 pub use transport::RetryPolicy;

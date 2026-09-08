@@ -9,11 +9,11 @@ real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
 > **Status: early development, and the published versions are alphas.** The
-> request/response transport, discovery and typed pilot/config methods are in,
-> and so is the everyday CLI surface — `discover`, `status`, `info`, `on`,
-> `off`, `toggle`, `set` and `scenes`. `watch` and `bench` wait on the push
-> listener and the streaming write path, and are still stubbed. The API will
-> change without warning until `0.1.0`.
+> request/response transport, discovery, typed pilot/config methods and the
+> rate-limited streaming path are in, and so is the everyday CLI surface —
+> `discover`, `status`, `info`, `on`, `off`, `toggle`, `set` and `scenes`.
+> `watch` and `bench` are still stubbed. The API will change without warning
+> until `0.1.0`.
 >
 > Alphas are published to keep the release path exercised rather than to be
 > depended on, so **every version below has to be spelled out in full**. Cargo
@@ -29,7 +29,8 @@ real-time control, and it is the protocol layer underneath
 - ~~`getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
   requests and responses~~ — done
 - ~~Bulb model parsing: capabilities, scene support and Kelvin range~~ — done
-- A rate-limited streaming path for driving bulbs from live audio or video
+- ~~A rate-limited streaming path for driving bulbs from live audio or video~~ —
+  done; its 20 Hz default is explicitly a placeholder until hardware benchmarking
 - `syncPilot` push updates
 
 **Not planned: RGB ↔ RGB+CW conversion.** A WiZ RGB bulb has five emitters, and
@@ -76,6 +77,28 @@ async fn main() -> Result<(), wizlight::Error> {
     .await?;
     Ok(())
 }
+```
+
+For real-time producers, create one stream and offer each frame without an
+`.await`. The stream keeps one pending frame, so a producer can never build a
+queue behind the network; if it outruns the rate limit, the newest frame wins.
+The default is an explicitly unverified 20 Hz placeholder until `wizlight bench`
+measures the hardware; use `StreamConfig` to override it.
+
+```rust,no_run
+use std::net::{IpAddr, Ipv4Addr};
+
+use wizlight::{Bulb, Dimming, PilotBuilder};
+
+# async fn example() -> Result<(), wizlight::Error> {
+let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
+let stream = bulb.stream();
+stream.send(&PilotBuilder::new().dimming(Dimming::new(40)?))?;
+stream.send(&PilotBuilder::new().dimming(Dimming::new(60)?))?;
+let counters = stream.shutdown().await;
+println!("sent {}, coalesced {}", counters.sent, counters.coalesced);
+# Ok(())
+# }
 ```
 
 Every channel value is a valid one, so `Channel::new` cannot fail. The types

@@ -19,7 +19,7 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use tokio::time::{Instant, sleep_until, timeout};
 
 use crate::error::{Error, Result};
@@ -68,6 +68,8 @@ pub(crate) struct Transport {
     socket: UdpSocket,
     /// Held for a whole exchange, so replies cannot be stolen by another one.
     exchange: Mutex<()>,
+    /// Serialises pacing and the socket write, but not the wait for a reply.
+    send: Mutex<()>,
     pacer: Pacer,
 }
 
@@ -80,6 +82,7 @@ impl Transport {
         Ok(Self {
             socket: UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?,
             exchange: Mutex::new(()),
+            send: Mutex::new(()),
             pacer: Pacer::default(),
         })
     }
@@ -87,6 +90,29 @@ impl Transport {
     /// The address the socket is bound to.
     pub(crate) fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.socket.local_addr()?)
+    }
+
+    /// Reserves and paces a socket write for the active request.
+    async fn send_slot(&self, min_interval: Duration) -> SendSlot<'_> {
+        let send = self.send.lock().await;
+        self.pacer.pace(min_interval).await;
+        SendSlot {
+            socket: &self.socket,
+            _exchange: None,
+            _send: send,
+        }
+    }
+
+    /// Reserves a write between request exchanges for the streaming path.
+    pub(crate) async fn stream_slot(&self, min_interval: Duration) -> SendSlot<'_> {
+        let exchange = self.exchange.lock().await;
+        let send = self.send.lock().await;
+        self.pacer.pace(min_interval).await;
+        SendSlot {
+            socket: &self.socket,
+            _exchange: Some(exchange),
+            _send: send,
+        }
     }
 
     /// Sends `request` to `addr` and waits for its reply, retrying until the
@@ -105,9 +131,9 @@ impl Transport {
         self.discard_backlog();
 
         for _ in 0..attempts {
-            self.pacer.pace(policy.min_interval).await;
-            match self.socket.send_to(&payload, addr).await {
-                Ok(_) => {}
+            let slot = self.send_slot(policy.min_interval).await;
+            match slot.send(addr, &payload).await {
+                Ok(()) => {}
                 // Windows reports an earlier datagram's ICMP port-unreachable
                 // as an error on the *next* call. That is a bulb that was off,
                 // not a broken socket, so it counts as a failed attempt.
@@ -165,6 +191,21 @@ impl Transport {
     fn discard_backlog(&self) {
         let mut buf = [0u8; 4096];
         while self.socket.try_recv_from(&mut buf).is_ok() {}
+    }
+}
+
+/// One paced, exclusive socket write.
+pub(crate) struct SendSlot<'a> {
+    socket: &'a UdpSocket,
+    _exchange: Option<MutexGuard<'a, ()>>,
+    _send: MutexGuard<'a, ()>,
+}
+
+impl SendSlot<'_> {
+    /// Sends one pre-serialised datagram without reading its reply.
+    pub(crate) async fn send(self, addr: SocketAddr, payload: &[u8]) -> std::io::Result<()> {
+        self.socket.send_to(payload, addr).await?;
+        Ok(())
     }
 }
 
