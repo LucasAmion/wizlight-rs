@@ -5,6 +5,7 @@ mod bulb;
 mod discovery;
 mod error;
 mod push;
+mod stream;
 mod transport;
 
 pub mod protocol;
@@ -26,4 +27,5 @@ pub use protocol::{
 pub use push::{
     PUSH_KEEPALIVE_INTERVAL, PUSH_PORT, PushEvent, PushManager, PushSubscription, PushUnavailable,
 };
+pub use stream::{BulbStream, DEFAULT_STREAM_INTERVAL, StreamConfig, StreamCounters};
 pub use transport::RetryPolicy;

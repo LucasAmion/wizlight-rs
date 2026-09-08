@@ -1,12 +1,14 @@
 //! A handle to one bulb.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::protocol::{
     BulbData, BulbType, KelvinRange, ModelConfig, Pilot, PilotBuilder, Power, Request, Response,
     Scene, Success, SystemConfig, UserConfig,
 };
+use crate::stream::{BulbStream, StreamConfig};
 use crate::transport::{RetryPolicy, Transport};
 
 /// The UDP port every WiZ device listens on.
@@ -31,7 +33,7 @@ pub const PORT: u16 = 38899;
 /// ```
 pub struct Bulb {
     addr: SocketAddr,
-    transport: Transport,
+    transport: Arc<Transport>,
     policy: RetryPolicy,
 }
 
@@ -59,7 +61,7 @@ impl Bulb {
     pub async fn connect_to(addr: SocketAddr) -> Result<Self> {
         Ok(Self {
             addr,
-            transport: Transport::bind().await?,
+            transport: Arc::new(Transport::bind().await?),
             policy: RetryPolicy::default(),
         })
     }
@@ -90,6 +92,55 @@ impl Bulb {
     /// The policy in force.
     pub fn policy(&self) -> &RetryPolicy {
         &self.policy
+    }
+
+    /// Starts a fire-and-forget pilot stream at the default rate limit.
+    ///
+    /// The returned handle accepts updates synchronously, keeps at most the
+    /// newest pending frame, and sends on this bulb's existing socket. Reads can
+    /// run concurrently; do not mix it with reliable `setPilot` writes, whose
+    /// identical acknowledgements carry no request id. Use [`BulbStream::shutdown`]
+    /// to wait for the final frame before exiting.
+    ///
+    /// ```no_run
+    /// # use std::net::{IpAddr, Ipv4Addr};
+    /// # use wizlight::{Bulb, Dimming, PilotBuilder};
+    /// # async fn example() -> Result<(), wizlight::Error> {
+    /// let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
+    /// let stream = bulb.stream();
+    /// stream.send(&PilotBuilder::new().dimming(Dimming::new(40)?))?;
+    /// let counters = stream.shutdown().await;
+    /// assert_eq!(counters.sent, 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
+    pub fn stream(&self) -> BulbStream {
+        self.stream_with_config(StreamConfig::default())
+    }
+
+    /// Starts a fire-and-forget pilot stream with a custom rate limit.
+    ///
+    /// Streams share both the UDP socket and its request-safe network pacer with
+    /// this handle. Their own token bucket uses `config` and has capacity one.
+    /// Read and config requests safely pause the stream while their exchange is
+    /// active. Do not run a reliable `setPilot` request concurrently: WiZ replies
+    /// carry no id, so its acknowledgement cannot be distinguished from a late
+    /// stream acknowledgement for the same method.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called outside a Tokio runtime.
+    pub fn stream_with_config(&self, config: StreamConfig) -> BulbStream {
+        BulbStream::new(
+            self.addr,
+            Arc::clone(&self.transport),
+            self.policy.min_interval,
+            config,
+        )
     }
 
     /// Reads the bulb's current pilot state.
