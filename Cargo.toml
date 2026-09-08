@@ -48,8 +48,8 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [dependencies]
-# Only for the `Stream` impl on discovery; the full `futures` crate is not
-# needed to produce one.
+# Only for the `Stream` impls on discovery and push subscriptions; the full
+# `futures` crate is not needed to produce them.
 futures-core = "0.3.31"
 serde = { version = "1.0.229", features = ["derive"] }
 # Deliberately *not* `preserve_order`. It would keep `Request`'s params in
@@ -85,6 +85,7 @@ tokio = { version = "1.53.1", default-features = false, features = [
     "macros",
     "net",
     "rt-multi-thread",
+    "test-util",
     "time",
 ] }
 
