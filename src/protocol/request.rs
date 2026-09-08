@@ -16,9 +16,10 @@ use crate::error::Result;
 /// requests, so neither is worth building, but it does mean the two spellings
 /// are not interchangeable.
 ///
-/// There is deliberately no envelope-level `id`. The one `id` in the protocol
-/// belongs to `registration`'s params, and no reply ever echoes it back, so it
-/// cannot be used to match responses to requests.
+/// There is deliberately no envelope-level `id`. Discovery puts `"id":"1"`
+/// inside `registration`'s params, while the push registration the app sends
+/// omits it; no reply echoes either form back, so it cannot match responses to
+/// requests.
 ///
 /// ```
 /// use wizlight::Request;

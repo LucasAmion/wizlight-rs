@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll};
@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
 
+use crate::discovery::local_ip_towards;
 use crate::error::{Error, Result};
 use crate::protocol::{Pilot, Request};
 
@@ -141,6 +142,30 @@ impl PushManager {
         self.local_addr
     }
 
+    /// Re-registers every active subscription immediately.
+    ///
+    /// WiZ discovery sends `register: false` and may clear an existing push
+    /// registration. Call this after a [`Discovery`](crate::Discovery) run that
+    /// overlaps active subscriptions rather than waiting for the next periodic
+    /// keepalive.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::PushUnavailable`] if the listener has stopped, or the
+    /// first [`Error::Io`] from a registration send after trying every target.
+    pub async fn refresh(&self) -> Result<()> {
+        let socket = self
+            .shared
+            .socket
+            .upgrade()
+            .ok_or(PushUnavailable::ListenerStopped)?;
+        let registrations = self
+            .shared
+            .registrations()
+            .ok_or(PushUnavailable::ListenerStopped)?;
+        send_registrations(&socket, registrations).await
+    }
+
     /// Subscribes to one bulb, identified by its MAC.
     ///
     /// Registration is sent before this returns, then refreshed every
@@ -163,9 +188,7 @@ impl PushManager {
         target: SocketAddr,
     ) -> Result<PushSubscription> {
         let mac = mac.into().to_ascii_lowercase();
-        let phone_ip = local_ip_towards(target)
-            .await
-            .ok_or(PushUnavailable::SourceIp { target })?;
+        let phone_ip = local_ip_towards(target).ok_or(PushUnavailable::SourceIp { target })?;
         let payload = registration(phone_ip, true)?;
         let unregister = registration(phone_ip, false)?;
         let socket = self
@@ -477,11 +500,22 @@ async fn keepalive(socket: Arc<UdpSocket>, shared: Arc<Shared>) {
         let Some(registrations) = shared.registrations() else {
             return;
         };
-        for (target, payload) in registrations {
-            let _ = socket.send_to(&payload, target).await;
-        }
+        let _ = send_registrations(&socket, registrations).await;
         next += PUSH_KEEPALIVE_INTERVAL;
     }
+}
+
+async fn send_registrations(
+    socket: &UdpSocket,
+    registrations: Vec<(SocketAddr, Vec<u8>)>,
+) -> Result<()> {
+    let mut first_error = None;
+    for (target, payload) in registrations {
+        if let Err(error) = socket.send_to(&payload, target).await {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), |error| Err(Error::Io(error)))
 }
 
 #[derive(Deserialize)]
@@ -521,18 +555,4 @@ fn registration(phone_ip: IpAddr, register: bool) -> Result<Vec<u8>> {
         }),
     )?;
     Ok(serde_json::to_vec(&request)?)
-}
-
-async fn local_ip_towards(target: SocketAddr) -> Option<IpAddr> {
-    let bind_addr = match target {
-        SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
-        SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
-    };
-    let socket = UdpSocket::bind(bind_addr).await.ok()?;
-    socket.connect(target).await.ok()?;
-    match socket.local_addr().ok()?.ip() {
-        IpAddr::V4(ip) if ip.is_unspecified() => None,
-        IpAddr::V6(ip) if ip.is_unspecified() => None,
-        ip => Some(ip),
-    }
 }

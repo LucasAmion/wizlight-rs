@@ -9,7 +9,9 @@ use common::mock_bulb::MockBulb;
 use serde_json::json;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
-use wizlight::{Error, PUSH_KEEPALIVE_INTERVAL, PushEvent, PushManager, PushUnavailable};
+use wizlight::{
+    Discovery, Error, PUSH_KEEPALIVE_INTERVAL, PushEvent, PushManager, PushUnavailable,
+};
 
 const WAIT: Duration = Duration::from_secs(2);
 
@@ -65,6 +67,7 @@ async fn mock_bulb_sync_pilot_is_parsed_and_registered_with_the_route_source_ip(
     assert_eq!(request["params"]["phoneIp"], "127.0.0.1");
     assert_eq!(request["params"]["phoneMac"], "AAAAAAAAAAAA");
     assert_eq!(request["params"]["register"], true);
+    assert!(request["params"].get("id").is_none());
 }
 
 #[tokio::test(start_paused = true)]
@@ -92,6 +95,35 @@ async fn registration_is_refreshed_every_twenty_seconds() {
 
     tokio::time::advance(Duration::from_millis(1)).await;
     wait_for_registrations(&bulb, 2).await;
+}
+
+#[tokio::test]
+async fn refresh_reregisters_after_discovery_clears_the_push_target() {
+    let manager = PushManager::bind_to(loopback(0)).await.expect("bind push");
+    let bulb = MockBulb::builder()
+        .push_port(manager.local_addr().port())
+        .start()
+        .await;
+    let mut subscription = manager
+        .subscribe(bulb.mac(), bulb.addr())
+        .await
+        .expect("subscribe");
+    let _ = next(&mut subscription).await;
+    assert_eq!(bulb.push_target(), Some(manager.local_addr()));
+
+    Discovery::new()
+        .target(bulb.addr())
+        .collect(Duration::from_millis(50))
+        .await
+        .expect("discover");
+    assert_eq!(bulb.push_target(), None);
+
+    manager.refresh().await.expect("refresh registration");
+    let PushEvent::SyncPilot { pilot, .. } = next(&mut subscription).await else {
+        panic!("expected syncPilot after refresh");
+    };
+    assert_eq!(pilot.mac.as_deref(), Some(bulb.mac()));
+    assert_eq!(bulb.push_target(), Some(manager.local_addr()));
 }
 
 #[tokio::test]
@@ -218,4 +250,29 @@ async fn registry_routes_by_mac_and_the_last_cancel_releases_the_port() {
         .await
         .expect("listener port released after cancellation");
     drop(rebound);
+}
+
+#[tokio::test]
+async fn dropping_the_last_subscription_stops_the_listener() {
+    let probe = UdpSocket::bind(loopback(0)).await.expect("allocate port");
+    let addr = probe.local_addr().expect("allocated addr");
+    drop(probe);
+
+    let manager = PushManager::bind_to(addr).await.expect("bind push");
+    let bulb = MockBulb::builder().push_port(addr.port()).start().await;
+    let mut subscription = manager
+        .subscribe(bulb.mac(), bulb.addr())
+        .await
+        .expect("subscribe");
+    let _ = next(&mut subscription).await;
+    drop(subscription);
+
+    for _ in 0..100 {
+        if let Ok(rebound) = UdpSocket::bind(addr).await {
+            drop(rebound);
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("listener port was not released after dropping its last subscription");
 }
