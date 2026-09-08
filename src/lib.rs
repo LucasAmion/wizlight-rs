@@ -4,6 +4,7 @@
 mod bulb;
 mod discovery;
 mod error;
+mod push;
 mod stream;
 mod transport;
 
@@ -22,6 +23,9 @@ pub use protocol::{
     Dimming, Features, Heads, Kelvin, KelvinRange, ModelConfig, ModuleName, Pilot, PilotBuilder,
     PilotParams, Power, Ratio, Request, Response, Scene, SceneId, Speed, Success, SystemConfig,
     UserConfig,
+};
+pub use push::{
+    PUSH_KEEPALIVE_INTERVAL, PUSH_PORT, PushEvent, PushManager, PushSubscription, PushUnavailable,
 };
 pub use stream::{BulbStream, DEFAULT_STREAM_INTERVAL, StreamConfig, StreamCounters};
 pub use transport::RetryPolicy;

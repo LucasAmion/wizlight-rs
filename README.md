@@ -9,11 +9,11 @@ real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
 > **Status: early development, and the published versions are alphas.** The
-> request/response transport, discovery, typed pilot/config methods and the
-> rate-limited streaming path are in, and so is the everyday CLI surface —
-> `discover`, `status`, `info`, `on`, `off`, `toggle`, `set` and `scenes`.
-> `watch` and `bench` are still stubbed. The API will change without warning
-> until `0.1.0`.
+> request/response transport, discovery, typed pilot/config methods, the
+> rate-limited streaming path and the `syncPilot` push listener are in, and so
+> is the everyday CLI surface — `discover`, `status`, `info`, `on`, `off`,
+> `toggle`, `set` and `scenes`. `watch` and `bench` are still stubbed. The API
+> will change without warning until `0.1.0`.
 >
 > Alphas are published to keep the release path exercised rather than to be
 > depended on, so **every version below has to be spelled out in full**. Cargo
@@ -31,7 +31,8 @@ real-time control, and it is the protocol layer underneath
 - ~~Bulb model parsing: capabilities, scene support and Kelvin range~~ — done
 - ~~A rate-limited streaming path for driving bulbs from live audio or video~~ —
   done; its 20 Hz default is explicitly a placeholder until hardware benchmarking
-- `syncPilot` push updates
+- ~~`syncPilot` push updates~~ — done, with one shared listener and per-MAC
+  subscriptions
 
 **Not planned: RGB ↔ RGB+CW conversion.** A WiZ RGB bulb has five emitters, and
 deciding how to spread a colour across them is a judgement call, not a protocol

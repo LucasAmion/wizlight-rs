@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -432,12 +432,19 @@ fn registration(phone_ip: Option<IpAddr>) -> Result<Vec<u8>> {
 /// Connecting a UDP socket sends nothing; it just asks the routing table. `None`
 /// if there is no route at all — on a host with no network, which is a state
 /// discovery is about to fail in anyway.
-fn local_ip_towards(target: SocketAddr) -> Option<IpAddr> {
-    let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
-    socket.set_broadcast(true).ok()?;
+pub(crate) fn local_ip_towards(target: SocketAddr) -> Option<IpAddr> {
+    let bind_addr = match target {
+        SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        SocketAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+    };
+    let socket = std::net::UdpSocket::bind(bind_addr).ok()?;
+    if target.is_ipv4() {
+        socket.set_broadcast(true).ok()?;
+    }
     socket.connect(target).ok()?;
     match socket.local_addr().ok()?.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => None,
+        IpAddr::V6(ip) if ip.is_unspecified() => None,
         ip => Some(ip),
     }
 }

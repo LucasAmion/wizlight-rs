@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::protocol::DeviceError;
+use crate::push::PushUnavailable;
 
 /// A [`Result`](std::result::Result) with this crate's [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
@@ -40,6 +41,10 @@ pub enum Error {
     /// A reply could not be parsed, or a request could not be serialised.
     #[error("malformed json: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// Push updates are unavailable, so the caller can fall back to polling.
+    #[error("push updates unavailable: {0}")]
+    PushUnavailable(#[from] PushUnavailable),
 
     /// The bulb answered with an `error` envelope that has no more specific
     /// variant here.
