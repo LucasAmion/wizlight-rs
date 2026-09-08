@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] — 2026-09-08
+
+The alpha where the library surface needed by WiZzard became complete. Live
+producers can write without back-pressure, and callers can receive state changes
+without polling. The CLI can also address the cold and warm white emitters that
+the library already exposed.
+
+### Added
+
+- `Bulb::stream()` and `BulbStream`: fire-and-forget `setPilot` updates behind a
+  capacity-one rate limiter. A producer never waits for the network; the newest
+  pending frame replaces stale ones, and sent/coalesced/dropped counters make
+  that visible. Shutdown flushes the final frame. The 20 Hz default is explicitly
+  provisional until the hardware rate spike measures it.
+- `PushManager` and `PushSubscription`: one shared UDP listener on `:38900`, with
+  bounded per-MAC `syncPilot` and `firstBeat` streams, per-target source-IP
+  selection, 20-second registration renewal and awaitable cancellation. A port
+  owned by another process returns the typed `PushUnavailable::PortInUse`, so a
+  caller can fall back to polling.
+- `PushManager::refresh()`, for immediately restoring every active subscription
+  after a discovery scan. Measured on both bulbs: discovery's `register: false`
+  clears an existing push target even though it came from another socket.
+- CLI `--cold` and `--warm`, separately addressing the two white emitters and
+  composing with `--rgb` / `--hsv`. A white emitter can also be sent alone, which
+  is a white-only write rather than an addition to the colour already showing.
+
+### Fixed
+
+- Raw channel writes now reject an all-zero group before the wire. The bulb
+  silently discards all five zeroes, then may acknowledge another field in the
+  request as though the colour had worked.
+- The mock bulb now matches the measured channel behavior: `r`/`g`/`b`/`c`/`w`
+  are one replacing instruction, omitted channels go dark, and values outside a
+  byte are truncated rather than range-checked.
+- A streaming writer and a reliable reader can share one bulb socket without a
+  `setPilot` acknowledgement being mistaken for the reply being awaited.
+
+### Known gaps
+
+- `watch` and `bench` remain CLI stubs. Their library foundations now exist, but
+  rendering push deltas and the repeatable rate/latency diagnostic are separate
+  work.
+- The 20 Hz stream limit is a working value, not the result of the R1 spike.
+- The CLI still does not derive every subnet broadcast address automatically or
+  report discovery results as they arrive.
+
 ## [0.1.0-alpha.3] — 2026-08-26
 
 The alpha that changes how the CLI is installed rather than what it does: there
@@ -332,7 +378,8 @@ is only reachable by asking for `0.1.0-alpha.1` exactly.
   error explaining that.
 
 [light-modes]: https://docs.pro.wizconnected.com/#light-modes
-[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.3...HEAD
+[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.4...HEAD
+[0.1.0-alpha.4]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.1
