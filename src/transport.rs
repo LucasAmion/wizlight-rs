@@ -37,6 +37,16 @@ use crate::protocol::{Request, Response};
 /// `pywizlight` uses six datagrams with a 0.75 s → 3 s backoff over a 13 s
 /// timeout. Nothing observed on this hardware justifies waiting that long: an
 /// unreachable bulb here fails in under two seconds.
+///
+/// ```
+/// use std::time::Duration;
+/// use wizlight::RetryPolicy;
+///
+/// let policy = RetryPolicy::default();
+/// assert_eq!(policy.attempts, 3);
+/// assert_eq!(policy.attempt_timeout, Duration::from_millis(500));
+/// assert_eq!(policy.min_interval, Duration::from_millis(20));
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// How many datagrams to send before giving up. Default 3.

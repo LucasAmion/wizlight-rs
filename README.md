@@ -43,7 +43,10 @@ and measured against raw RGB on hardware before being dropped: it renders a
 near-white better, ties or loses elsewhere, and cannot reach some colours at all.
 Anything that good is worth an application deciding for itself.
 
-## Library usage
+The wire protocol, measured behavior, model grammar, scene rules and known
+unknowns are collected in [`docs/WIZ_PROTOCOL.md`](docs/WIZ_PROTOCOL.md).
+
+## Library quickstart
 
 ```toml
 [dependencies]
@@ -78,6 +81,14 @@ async fn main() -> Result<(), wizlight::Error> {
     .await?;
     Ok(())
 }
+```
+
+Runnable versions live in [`examples/discover.rs`](examples/discover.rs) and
+[`examples/set_colour.rs`](examples/set_colour.rs):
+
+```console
+$ cargo run --example discover
+$ cargo run --example set_colour -- 192.168.0.5
 ```
 
 For real-time producers, create one stream and offer each frame without an
@@ -334,6 +345,13 @@ To clear it:
 $ xattr -d com.apple.quarantine ./wizlight
 ```
 
+## Acknowledgements
+
+[`pywizlight`][pywizlight] is the protocol reference and port source.
+[`wiz-lights-rs`][wiz-lights-rs] informed the typed API shape. The behavior
+recorded here is checked against captures and the local mock rather than assumed
+to match either project.
+
 ## Compatibility
 
 - MSRV **1.85** (Rust 2024 edition)
@@ -344,3 +362,4 @@ $ xattr -d com.apple.quarantine ./wizlight
 MIT — see [LICENSE](https://github.com/LucasAmion/wizlight-rs/blob/main/LICENSE).
 
 [pywizlight]: https://github.com/sbidy/pywizlight
+[wiz-lights-rs]: https://github.com/jorgeajimenezl/wiz-lights-rs

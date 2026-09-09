@@ -23,6 +23,16 @@ use crate::{Bulb, Discovery, Result, RetryPolicy};
 /// The original spelling is kept so that output can echo the argument back
 /// exactly as given. A script that fans out over targets it supplied should
 /// not have to recognise its own input in a normalised form.
+///
+/// ```
+/// use wizlight::cli::TargetSpec;
+///
+/// let address: TargetSpec = "192.168.0.5".parse()?;
+/// assert!(address.address().is_some());
+/// let mac: TargetSpec = "98:77:D5:23:0F:0A".parse()?;
+/// assert_eq!(mac.mac(), Some("9877d5230f0a"));
+/// # Ok::<(), wizlight::cli::BadTarget>(())
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetSpec {
     raw: String,

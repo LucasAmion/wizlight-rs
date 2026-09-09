@@ -76,6 +76,16 @@ pub const EXIT_TIMEOUT: u8 = 4;
 /// promotes the comment to the long description, so `wizlight --help` opened
 /// with "Global CLI flags shared across all commands." while `-h` showed the
 /// real one — internal notes leaking into user-facing help.
+///
+/// ```
+/// use clap::Parser;
+/// use wizlight::cli::{Cli, Command};
+///
+/// let cli = Cli::try_parse_from(["wizlight", "--json", "--wait", "1", "discover"])?;
+/// assert!(cli.json);
+/// assert!(matches!(cli.command, Command::Discover));
+/// # Ok::<(), clap::Error>(())
+/// ```
 #[derive(Debug, Parser)]
 #[command(name = "wizlight", about = "Philips WiZ smart bulb control")]
 #[command(version, long_about = None, arg_required_else_help = true)]

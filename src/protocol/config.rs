@@ -65,6 +65,16 @@ impl SystemConfig {
 ///
 /// The 1.38.0 firmware returns many more fields than any `pywizlight` fixture;
 /// only the ones callers need today are typed. The rest stay ignored.
+///
+/// ```
+/// use wizlight::{KelvinRange, ModelConfig};
+///
+/// let config: ModelConfig = serde_json::from_str(
+///     r#"{"wcr":80,"nowc":2,"cctRange":[2200,2700,6500,6500]}"#,
+/// )?;
+/// assert_eq!(config.kelvin_range(), Some(KelvinRange::new(2200, 6500)));
+/// # Ok::<(), wizlight::Error>(())
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
