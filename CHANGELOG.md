@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CLI broadcast auto-detection derives one target per viable local IPv4 subnet,
+  including multi-homed hosts. Loopback, down, link-local and point-to-point
+  interfaces are excluded; repeatable `--broadcast` flags remain an explicit
+  override.
+
 ## [0.1.0-alpha.4] — 2026-09-08
 
 The alpha where the library surface needed by WiZzard became complete. Live
