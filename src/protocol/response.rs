@@ -11,6 +11,18 @@ use crate::error::Result;
 /// Every field is optional: a reply carries either a `result` or an `error`,
 /// the `-32700` parse error carries no `method`, and unknown fields are
 /// ignored rather than rejected.
+///
+/// ```
+/// use wizlight::{Pilot, Response};
+///
+/// let response: Response = serde_json::from_str(
+///     r#"{"method":"getPilot","result":{"state":true,"dimming":40}}"#,
+/// )?;
+/// let pilot: Pilot = response.parse_result()?;
+/// assert_eq!(pilot.state, Some(true));
+/// assert_eq!(pilot.dimming, Some(40));
+/// # Ok::<(), wizlight::Error>(())
+/// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Response {

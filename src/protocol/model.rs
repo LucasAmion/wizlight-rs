@@ -293,6 +293,15 @@ impl Serialize for ModuleName {
 /// this range in both directions and reports the clamped value, so a
 /// temperature outside it produces light of the wrong colour however
 /// cheerfully the write was acknowledged.
+///
+/// ```
+/// use wizlight::KelvinRange;
+///
+/// let range = KelvinRange::new(6500, 2200);
+/// assert_eq!((range.min(), range.max()), (2200, 6500));
+/// assert!(range.contains(2700));
+/// assert!(!range.contains(12000));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct KelvinRange {
     min: u16,

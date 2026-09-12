@@ -111,6 +111,12 @@ open_newtype! {
     /// An 8-bit channel value (`r` / `g` / `b` / `c` / `w`).
     ///
     /// The wire range is the whole of `u8`, so construction is infallible.
+    ///
+    /// ```
+    /// use wizlight::Channel;
+    ///
+    /// assert_eq!(Channel::new(255).get(), 255);
+    /// ```
     Channel(u8)
 }
 
@@ -287,6 +293,14 @@ bounded_newtype! {
     ///
     /// `dimming: 0` does not switch the bulb off; it leaves it on at `1`. Use
     /// [`PilotBuilder::state`](super::PilotBuilder::state) for that.
+    ///
+    /// ```
+    /// use wizlight::Dimming;
+    ///
+    /// assert_eq!(Dimming::new(40)?.get(), 40);
+    /// assert!(Dimming::new(0).is_err());
+    /// # Ok::<(), wizlight::Error>(())
+    /// ```
     Dimming(u8), "dimming", 1..=100
 }
 

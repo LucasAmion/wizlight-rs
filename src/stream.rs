@@ -24,6 +24,15 @@ pub const DEFAULT_STREAM_INTERVAL: Duration = Duration::from_millis(50);
 /// The bucket holds one token, so an idle stream may send one frame immediately
 /// but cannot accumulate a burst. A zero interval removes the rate limit while
 /// keeping newest-frame coalescing.
+///
+/// ```
+/// use std::time::Duration;
+/// use wizlight::StreamConfig;
+///
+/// assert_eq!(StreamConfig::default().min_interval, Duration::from_millis(50));
+/// let unlimited = StreamConfig { min_interval: Duration::ZERO };
+/// assert_eq!(unlimited.min_interval, Duration::ZERO);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamConfig {
     /// The minimum gap between stream send attempts.

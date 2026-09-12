@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including multi-homed hosts. Loopback, down, link-local and point-to-point
   interfaces are excluded; repeatable `--broadcast` flags remain an explicit
   override.
+- Complete local-protocol documentation, including measured versus inherited
+  behavior and an explicit placeholder for the remaining streaming-rate spike.
+- Runnable discovery and five-channel colour examples, plus additional doc-tests
+  for the main configuration, transport, CLI and value-type APIs.
 
 ## [0.1.0-alpha.4] — 2026-09-08
 
