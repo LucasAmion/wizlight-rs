@@ -23,9 +23,10 @@ real-time control, and it is the protocol layer underneath
 
 ## Planned scope
 
-- ~~Discovery by UDP broadcast~~ — done, though the CLI does not yet derive the
-  broadcast address from the local interfaces; `--broadcast` names it, and the
-  all-subnets default reaches everything on the attached network
+- ~~Discovery by UDP broadcast~~ — done; the CLI derives every viable subnet's
+  broadcast address from local interfaces, while repeatable `--broadcast` flags
+  override auto-detection. Fixture-tested and verified on a `192.168.0.0/24`
+  LAN, where flag-free discovery selected `192.168.0.255` and found both bulbs
 - ~~`getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
   requests and responses~~ — done
 - ~~Bulb model parsing: capabilities, scene support and Kelvin range~~ — done
