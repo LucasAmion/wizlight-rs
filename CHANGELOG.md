@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- CLI broadcast auto-detection derives one target per viable local IPv4 subnet,
+  including multi-homed hosts. Loopback, down, link-local and point-to-point
+  interfaces are excluded; repeatable `--broadcast` flags remain an explicit
+  override.
 - Complete local-protocol documentation, including measured versus inherited
   behavior and an explicit placeholder for the remaining streaming-rate spike.
 - Runnable discovery and five-channel colour examples, plus additional doc-tests

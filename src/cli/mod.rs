@@ -35,12 +35,16 @@
 //! answered, and nothing here yet fails at a bulb that was supposed to be
 //! listening.
 
+use std::collections::BTreeSet;
 use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use if_addrs::IfAddr;
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
 
@@ -116,9 +120,9 @@ pub struct Cli {
 
     /// Override the address discovery broadcasts to. Repeatable.
     ///
-    /// The default reaches every bulb on the directly attached network. A
-    /// host on several networks needs one of these per subnet, because the
-    /// kernel routes the all-subnets address out of one interface only.
+    /// By default, the subnet broadcast address of every viable local IPv4
+    /// interface is used, including on multi-homed hosts. Pass this flag to
+    /// restrict or replace those targets.
     #[arg(long, global = true, value_name = "ADDR", value_parser = address)]
     pub broadcast: Vec<SocketAddr>,
 
@@ -152,15 +156,92 @@ impl Cli {
     /// `system_config` costs a round trip per bulb and is only worth paying
     /// for a listing. Resolving a MAC does not need it: the broadcast reply
     /// already carries the one field being matched on.
-    #[must_use]
-    pub fn discovery(&self, system_config: bool) -> Discovery {
+    ///
+    /// Without an explicit `--broadcast`, every viable local IPv4 interface
+    /// contributes its subnet broadcast address.
+    ///
+    /// # Errors
+    ///
+    /// If local interfaces cannot be enumerated, or none can carry a broadcast.
+    pub fn discovery(&self, system_config: bool) -> anyhow::Result<Discovery> {
         let discovery = Discovery::new()
             .system_config(system_config)
             .policy(self.policy());
-        self.broadcast
+        let targets = broadcast_targets(&self.broadcast, local_ipv4_interfaces)?;
+        tracing::debug!(?targets, "selected discovery targets");
+        Ok(targets
             .iter()
-            .fold(discovery, |discovery, addr| discovery.target(*addr))
+            .fold(discovery, |discovery, addr| discovery.target(*addr)))
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InterfaceAddress {
+    ip: Ipv4Addr,
+    netmask: Ipv4Addr,
+    up: bool,
+    point_to_point: bool,
+}
+
+fn local_ipv4_interfaces() -> io::Result<Vec<InterfaceAddress>> {
+    if_addrs::get_if_addrs().map(|interfaces| {
+        interfaces
+            .into_iter()
+            .filter_map(|interface| {
+                let up = interface.is_oper_up();
+                let point_to_point = interface.is_p2p();
+                match interface.addr {
+                    IfAddr::V4(addr) => Some(InterfaceAddress {
+                        ip: addr.ip,
+                        netmask: addr.netmask,
+                        up,
+                        point_to_point,
+                    }),
+                    IfAddr::V6(_) => None,
+                }
+            })
+            .collect()
+    })
+}
+
+fn broadcast_targets<F>(explicit: &[SocketAddr], enumerate: F) -> anyhow::Result<Vec<SocketAddr>>
+where
+    F: FnOnce() -> io::Result<Vec<InterfaceAddress>>,
+{
+    if !explicit.is_empty() {
+        return Ok(explicit.to_vec());
+    }
+
+    let interfaces = enumerate().context("could not enumerate local network interfaces")?;
+    let targets: BTreeSet<SocketAddr> = interfaces
+        .into_iter()
+        .filter_map(|interface| {
+            let mask = u32::from(interface.netmask);
+            let host_mask = !mask;
+            let host_bits = host_mask.count_ones();
+            let contiguous = mask.leading_ones() + mask.trailing_zeros() == 32;
+            let viable = interface.up
+                && !interface.point_to_point
+                && !interface.ip.is_loopback()
+                && !interface.ip.is_link_local()
+                && !interface.ip.is_unspecified()
+                && !interface.ip.is_multicast()
+                && interface.ip != Ipv4Addr::BROADCAST
+                && contiguous
+                && (2..32).contains(&host_bits);
+            viable.then(|| {
+                SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::from(u32::from(interface.ip) | host_mask)),
+                    PORT,
+                )
+            })
+        })
+        .collect();
+
+    if targets.is_empty() {
+        anyhow::bail!("no viable IPv4 network interface found; pass --broadcast ADDRESS")
+    }
+    Ok(targets.into_iter().collect())
 }
 
 /// Parses a number of seconds, which may be fractional.
@@ -384,7 +465,10 @@ impl Outcome {
 /// saying so.
 pub async fn run_command(cli: &Cli) -> anyhow::Result<Outcome> {
     match &cli.command {
-        Command::Discover => discover::run(&cli.discovery(true), cli.wait).await,
+        Command::Discover => {
+            let discovery = cli.discovery(true)?;
+            discover::run(&discovery, cli.wait).await
+        }
         Command::Status(target) => {
             act(
                 cli,
@@ -457,14 +541,20 @@ where
     Fut: Future<Output = anyhow::Result<Report>> + Send + 'static,
 {
     let policy = cli.policy();
-    let discovery = cli.discovery(false);
 
     if let Some(spec) = &selection.target {
-        let bulb = target::resolve(spec, &discovery, cli.wait).await?;
+        let bulb = match spec.address() {
+            Some(addr) => Resolved { addr, mac: None },
+            None => {
+                let discovery = cli.discovery(false)?;
+                target::resolve(spec, &discovery, cli.wait).await?
+            }
+        };
         let report = op(bulb.connect(&policy).await?).await?;
         return Ok(Outcome::new(report.json, report.human));
     }
 
+    let discovery = cli.discovery(false)?;
     let bulbs = target::resolve_all(&discovery, cli.wait).await?;
     tracing::info!(bulbs = bulbs.len(), "fanning out");
 
@@ -671,5 +761,70 @@ pub fn run() -> ExitCode {
             );
             exit_code(&err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InterfaceAddress, broadcast_targets};
+    use std::io;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    fn interface(ip: [u8; 4], prefix: u8, up: bool, point_to_point: bool) -> InterfaceAddress {
+        let netmask = match prefix {
+            0 => 0,
+            prefix => u32::MAX << (32 - prefix),
+        };
+        InterfaceAddress {
+            ip: Ipv4Addr::from(ip),
+            netmask: Ipv4Addr::from(netmask),
+            up,
+            point_to_point,
+        }
+    }
+
+    #[test]
+    fn automatic_broadcasts_cover_every_viable_subnet_once() {
+        let interfaces = vec![
+            interface([192, 168, 4, 20], 24, true, false),
+            interface([192, 168, 4, 21], 24, true, false),
+            interface([10, 12, 8, 9], 20, true, false),
+            interface([172, 16, 1, 8], 24, false, false),
+            interface([127, 0, 0, 1], 8, true, false),
+            interface([169, 254, 8, 2], 16, true, false),
+            interface([100, 64, 0, 1], 30, true, true),
+            interface([198, 51, 100, 8], 31, true, false),
+            interface([203, 0, 113, 8], 32, true, false),
+        ];
+
+        let targets = broadcast_targets(&[], || Ok(interfaces)).expect("interfaces enumerate");
+        let expected: Vec<SocketAddr> = ["10.12.15.255:38899", "192.168.4.255:38899"]
+            .into_iter()
+            .map(|addr| addr.parse().expect("a socket address"))
+            .collect();
+        assert_eq!(targets, expected);
+    }
+
+    #[test]
+    fn automatic_broadcasts_fail_without_a_viable_interface() {
+        let interfaces = vec![
+            interface([127, 0, 0, 1], 8, true, false),
+            interface([169, 254, 8, 2], 16, true, false),
+            interface([192, 168, 4, 20], 24, false, false),
+        ];
+
+        let error = broadcast_targets(&[], || Ok(interfaces)).expect_err("no viable interface");
+        assert!(error.to_string().contains("--broadcast"));
+    }
+
+    #[test]
+    fn explicit_broadcasts_bypass_interface_enumeration() {
+        let explicit = ["192.168.9.255:38899".parse().expect("a socket address")];
+        let targets = broadcast_targets(&explicit, || -> io::Result<Vec<InterfaceAddress>> {
+            panic!("explicit targets must not enumerate interfaces")
+        })
+        .expect("explicit targets work without enumeration");
+
+        assert_eq!(targets, explicit);
     }
 }
