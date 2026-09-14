@@ -2,11 +2,10 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use serde_json::{Map, Value, json};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
@@ -205,9 +204,39 @@ async fn forward(
 }
 
 fn timestamp() -> anyhow::Result<String> {
-    OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .context("could not format the update timestamp")
+    timestamp_at(SystemTime::now())
+}
+
+fn timestamp_at(now: SystemTime) -> anyhow::Result<String> {
+    let elapsed = now
+        .duration_since(UNIX_EPOCH)
+        .context("the system clock is before the Unix epoch")?;
+    let seconds = elapsed.as_secs();
+    let days = (seconds / 86_400) as i64;
+    let seconds_of_day = seconds % 86_400;
+    let (year, month, day) = civil_date(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = seconds_of_day % 3_600 / 60;
+    let second = seconds_of_day % 60;
+    Ok(format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{:03}Z",
+        elapsed.subsec_millis()
+    ))
+}
+
+fn civil_date(days: i64) -> (i64, i64, i64) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
 }
 
 fn json_line(
@@ -461,6 +490,19 @@ mod tests {
         assert!(
             output.lines().any(|line| line.contains(second.mac())),
             "{output}"
+        );
+    }
+
+    #[test]
+    fn timestamps_are_utc_rfc3339_across_a_leap_day() {
+        assert_eq!(
+            timestamp_at(UNIX_EPOCH).expect("epoch formats"),
+            "1970-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            timestamp_at(UNIX_EPOCH + Duration::from_millis(951_782_400_123))
+                .expect("leap day formats"),
+            "2000-02-29T00:00:00.123Z"
         );
     }
 
