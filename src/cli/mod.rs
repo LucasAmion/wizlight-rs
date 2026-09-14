@@ -44,6 +44,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use if_addrs::IfAddr;
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
@@ -76,10 +77,9 @@ pub const EXIT_TIMEOUT: u8 = 4;
 ///
 /// `-v` is verbosity and `-V` is the version, following `cargo`'s convention.
 ///
-/// `long_about = None` keeps this doc comment out of `--help`. Without it clap
-/// promotes the comment to the long description, so `wizlight --help` opened
-/// with "Global CLI flags shared across all commands." while `-h` showed the
-/// real one — internal notes leaking into user-facing help.
+/// The explicit `long_about` keeps this doc comment out of `--help`. Without
+/// one clap promotes the comment to the long description, so internal notes
+/// leak into user-facing help.
 ///
 /// ```
 /// use clap::Parser;
@@ -91,8 +91,15 @@ pub const EXIT_TIMEOUT: u8 = 4;
 /// # Ok::<(), clap::Error>(())
 /// ```
 #[derive(Debug, Parser)]
-#[command(name = "wizlight", about = "Philips WiZ smart bulb control")]
-#[command(version, long_about = None, arg_required_else_help = true)]
+#[command(
+    name = "wizlight",
+    about = "Control Philips WiZ bulbs over the local network"
+)]
+#[command(
+    version,
+    arg_required_else_help = true,
+    long_about = "Control Philips WiZ bulbs directly over the local network — no cloud, account or hub.\n\nStart with:\n  wizlight discover\n  wizlight status <TARGET>\n  wizlight on <TARGET> --rgb 255,80,0\n  wizlight off <TARGET>"
+)]
 pub struct Cli {
     /// Emit JSON instead of human-readable output.
     #[arg(long, short = 'j', global = true, action = ArgAction::SetTrue)]
@@ -122,7 +129,8 @@ pub struct Cli {
     ///
     /// By default, the subnet broadcast address of every viable local IPv4
     /// interface is used, including on multi-homed hosts. Pass this flag to
-    /// restrict or replace those targets.
+    /// restrict or replace those targets, for example
+    /// `--broadcast 192.168.0.255`.
     #[arg(long, global = true, value_name = "ADDR", value_parser = address)]
     pub broadcast: Vec<SocketAddr>,
 
@@ -330,28 +338,41 @@ impl Report {
 pub enum Command {
     /// Discover bulbs on the current LAN.
     Discover,
-    /// Print the current pilot state for a target bulb.
+    /// Print the current state of a target bulb.
     Status(Target),
-    /// Print model info and supported capabilities for a target bulb.
-    Info(Target),
     /// Power a bulb on, optionally setting what it shows.
+    #[command(
+        after_long_help = "Examples:\n  wizlight on 9877d5230f0a\n  wizlight on 9877d5230f0a --rgb 255,80,0 --brightness 60\n  wizlight on --all --scene 'Deep dive' --speed 120"
+    )]
     On(Write),
     /// Power a bulb off.
     Off(Target),
-    /// Toggle the power state of a bulb.
-    Toggle(Target),
+    /// Print model, firmware and supported capabilities.
+    Info(Target),
     /// Change what a bulb shows, with `setState`.
     ///
     /// This does not leave a bulb that was off alone: measured on
     /// `ESP25_SHRGB_01` fw 1.38.0, `setState` turns it on exactly as
     /// `setPilot` does.
+    #[command(
+        after_long_help = "Examples:\n  wizlight set 9877d5230f0a --kelvin 2700\n  wizlight set 9877d5230f0a --rgb 255,80,0 --warm 64\n  wizlight set --all --brightness 40"
+    )]
     Set(Write),
+    /// Toggle the power state of a bulb.
+    Toggle(Target),
     /// List the scenes supported by the target bulb.
     Scenes(Target),
     /// Tail `syncPilot` push updates from a target bulb.
     Watch(Target),
     /// Benchmark the bulb update rate and latency.
     Bench(Target),
+    /// Generate a completion script for a shell.
+    #[command(hide = true)]
+    Completions {
+        /// The shell to generate completions for.
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 impl Command {
@@ -369,6 +390,7 @@ impl Command {
             Self::Scenes(_) => "scenes",
             Self::Watch(_) => "watch",
             Self::Bench(_) => "bench",
+            Self::Completions { .. } => "completions",
         }
     }
 
@@ -376,7 +398,7 @@ impl Command {
     #[must_use]
     pub fn selection(&self) -> Option<&Target> {
         match self {
-            Self::Discover => None,
+            Self::Discover | Self::Completions { .. } => None,
             Self::On(write) | Self::Set(write) => Some(&write.target),
             Self::Status(t)
             | Self::Info(t)
@@ -523,11 +545,21 @@ pub async fn run_command(cli: &Cli) -> anyhow::Result<Outcome> {
             })
             .await
         }
+        Command::Completions { shell } => Ok(completions(*shell)),
         other => anyhow::bail!(
             "`{}` is not implemented yet; this is the CLI scaffold",
             other.name()
         ),
     }
+}
+
+fn completions(shell: Shell) -> Outcome {
+    let mut command = Cli::command();
+    let mut output = Vec::new();
+    clap_complete::generate(shell, &mut command, "wizlight", &mut output);
+    let output = String::from_utf8(output).expect("clap completion scripts are UTF-8");
+    let human = output.trim_end_matches(['\r', '\n']).to_owned();
+    Outcome::new(Value::String(output), human)
 }
 
 /// Resolves the target, runs `op` against every bulb it named, and collects

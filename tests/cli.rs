@@ -9,7 +9,7 @@ use clap::{CommandFactory, Parser};
 use common::mock_bulb::{MockBulb, Personality};
 use serde_json::Value;
 use wizlight::cli::{Cli, Command, Target, render_failure, run_command};
-use wizlight::{DEFAULT_WAIT, RetryPolicy};
+use wizlight::{DEFAULT_WAIT, RetryPolicy, Scene};
 
 /// Runs the real binary, which is the only way to observe an exit code.
 fn wizlight(args: &[&str]) -> Output {
@@ -966,20 +966,105 @@ fn help_leaks_no_rustdoc_at_either_length() {
     let short = String::from_utf8(wizlight(&["-h"]).stdout).expect("utf-8");
 
     for help in [&long, &short] {
-        assert!(help.starts_with("Philips WiZ smart bulb control"), "{help}");
+        assert!(help.starts_with("Control Philips WiZ bulbs"), "{help}");
         assert!(!help.contains("Global CLI flags"), "{help}");
-        // Every subcommand is listed at both lengths.
-        for command in ["discover", "status", "info", "on", "off", "toggle", "set"] {
+        // Every visible subcommand is listed at both lengths.
+        for command in [
+            "discover", "status", "on", "off", "info", "set", "toggle", "scenes", "watch", "bench",
+        ] {
             assert!(help.contains(command), "{command} missing from {help}");
         }
+        assert!(
+            !help.contains("completions"),
+            "hidden command leaked: {help}"
+        );
     }
 
     // The long form is the one that elaborates, and only it.
+    assert!(long.contains("multi-homed"), "{long}");
+    assert!(long.contains("Start with:"), "{long}");
     assert!(
-        long.contains("multi-homed") || long.contains("several networks"),
-        "{long}"
+        long.lines().count() <= 80,
+        "help is taller than a terminal: {long}"
     );
+    let commands = long
+        .split_once("Commands:")
+        .and_then(|(_, rest)| rest.split_once("Options:"))
+        .map(|(commands, _)| commands)
+        .expect("commands section");
+    for pair in [
+        ("discover", "status"),
+        ("status", "on"),
+        ("on", "off"),
+        ("off", "info"),
+    ] {
+        assert!(
+            commands.find(&format!("  {}", pair.0)) < commands.find(&format!("  {}", pair.1)),
+            "wrong command order: {commands}"
+        );
+    }
     assert!(short.len() < long.len(), "-h should be the summary");
+}
+
+#[test]
+fn on_and_set_long_help_include_working_examples() {
+    for command in ["on", "set"] {
+        let output = wizlight(&[command, "--help"]);
+        assert_eq!(output.status.code(), Some(0), "{command}");
+        let help = String::from_utf8(output.stdout).expect("utf-8");
+        assert!(help.contains("Examples:"), "{command}: {help}");
+        assert!(
+            help.contains(&format!("wizlight {command}")),
+            "{command}: {help}"
+        );
+    }
+}
+
+#[test]
+fn every_command_and_flag_has_help_text() {
+    fn check(command: &clap::Command) {
+        assert!(
+            command.get_about().is_some(),
+            "{} has no about",
+            command.get_name()
+        );
+        for argument in command.get_arguments() {
+            assert!(
+                argument.get_help().is_some(),
+                "{} {} has no help",
+                command.get_name(),
+                argument.get_id()
+            );
+        }
+        for subcommand in command.get_subcommands() {
+            check(subcommand);
+        }
+    }
+
+    check(&Cli::command());
+}
+
+#[test]
+fn completions_generate_for_every_supported_shell_with_scene_hints() {
+    for scene in Scene::all() {
+        let hint = scene.name().to_ascii_lowercase().replace(' ', "-");
+        Cli::try_parse_from(["wizlight", "on", "192.168.0.5", "--scene", &hint])
+            .unwrap_or_else(|error| panic!("completion `{hint}` does not parse: {error}"));
+    }
+
+    for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+        let output = wizlight(&["completions", shell]);
+        assert_eq!(output.status.code(), Some(0), "{shell}");
+        assert!(output.stderr.is_empty(), "{shell}: {:?}", output.stderr);
+        let script = String::from_utf8(output.stdout).expect("utf-8");
+        assert!(script.contains("wizlight"), "{shell}: {script}");
+        if matches!(shell, "bash" | "zsh" | "fish") {
+            assert!(
+                script.contains("deep-dive"),
+                "scene hints missing from {shell}"
+            );
+        }
+    }
 }
 
 #[test]

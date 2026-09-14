@@ -284,6 +284,29 @@ is how long a scan lasts. The CLI is deliberately more patient than the
 library's default: a bulb at the far end of a flat has a round trip past a
 second.
 
+### Shell completions
+
+Generate a completion script from the installed binary and load it in the
+current shell:
+
+| Shell | Command |
+| --- | --- |
+| Bash | `source <(wizlight completions bash)` |
+| Zsh | `source <(wizlight completions zsh)` |
+| Fish | `wizlight completions fish \| source` |
+| PowerShell | `wizlight completions powershell \| Out-String \| Invoke-Expression` |
+| Elvish | `eval (wizlight completions elvish \| slurp)` |
+
+Add the command to the shell's startup file to load it in future sessions. Every
+GitHub release also carries the generated files as `wizlight.bash`, `_wizlight`,
+`wizlight.fish`, `wizlight.ps1` and `wizlight.elv`, ready to place in the shell's
+normal completion directory. Scene values are completed as accepted lowercase,
+hyphenated names such as `deep-dive`.
+
+A man page is deliberately not shipped. It would duplicate `--help`, while none
+of the current cross-platform installers has a portable man-directory hook;
+the built-in help remains available through every installation route.
+
 ### Installing
 
 From `0.1.0-alpha.3` onward each release carries prebuilt binaries, so a Rust

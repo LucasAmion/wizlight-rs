@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior and an explicit placeholder for the remaining streaming-rate spike.
 - Runnable discovery and five-channel colour examples, plus additional doc-tests
   for the main configuration, transport, CLI and value-type APIs.
+- Shell completion generation for Bash, Zsh, Fish, PowerShell and Elvish, with
+  completion files attached to releases and scene-name suggestions where the
+  shell generator supports them.
+
+### Changed
+
+- CLI help now starts with the common discovery and control commands, gives
+  examples for `on` and `set`, and keeps every command and flag documented.
 
 ## [0.1.0-alpha.4] — 2026-09-08
 

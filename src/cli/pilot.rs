@@ -1,7 +1,10 @@
 //! The commands that read and write a bulb's pilot state.
 
+use std::ffi::OsStr;
+
 use anyhow::Context as _;
-use clap::Args;
+use clap::builder::{PossibleValue, TypedValueParser};
+use clap::{Args, error::ErrorKind};
 use serde_json::{Value, json};
 
 use super::Report;
@@ -63,7 +66,7 @@ pub struct ColourOptions {
     pub kelvin: Option<Kelvin>,
 
     /// Scene, by id or by name.
-    #[arg(long, short = 's', value_name = "SCENE", value_parser = scene)]
+    #[arg(long, short = 's', value_name = "SCENE", value_parser = SceneParser)]
     pub scene: Option<SceneId>,
 }
 
@@ -538,6 +541,33 @@ fn brightness(input: &str) -> Result<Dimming, String> {
         .parse()
         .map_err(|_| format!("`{input}` is not a percentage"))?;
     Dimming::new(value).map_err(|err| err.to_string())
+}
+
+#[derive(Clone)]
+struct SceneParser;
+
+impl TypedValueParser for SceneParser {
+    type Value = SceneId;
+
+    fn parse_ref(
+        &self,
+        command: &clap::Command,
+        _argument: Option<&clap::Arg>,
+        value: &OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let input = value
+            .to_str()
+            .ok_or_else(|| clap::Error::new(ErrorKind::InvalidUtf8).with_cmd(command))?;
+        scene(input).map_err(|message| {
+            clap::Error::raw(ErrorKind::ValueValidation, message).with_cmd(command)
+        })
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        Some(Box::new(Scene::all().iter().copied().map(|scene| {
+            PossibleValue::new(scene.name().to_ascii_lowercase().replace(' ', "-"))
+        })))
+    }
 }
 
 /// Parses a scene, by id or by name.
