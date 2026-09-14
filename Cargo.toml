@@ -37,10 +37,12 @@ cli = [
     "dep:clap",
     "dep:anyhow",
     "dep:if-addrs",
+    "dep:time",
     "dep:tracing",
     "dep:tracing-subscriber",
     "tokio/rt-multi-thread",
     "tokio/macros",
+    "tokio/signal",
 ]
 
 [[bin]]
@@ -79,6 +81,7 @@ tracing-subscriber = { version = "0.3.23", features = [
     "env-filter",
 ], optional = true }
 if-addrs = { version = "0.15.0", optional = true }
+time = { version = "=0.3.45", features = ["formatting"], optional = true }
 
 [dev-dependencies]
 futures-util = { version = "0.3.31", default-features = false }
