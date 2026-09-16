@@ -12,8 +12,9 @@
 //!
 //! # The `--json` contract
 //!
-//! Every command emits one JSON object, and the envelope is the same whether
-//! the command worked or not:
+//! Every finite command emits one JSON object, and the envelope is the same
+//! whether the command worked or not. `watch` emits one such object per update
+//! as newline-delimited JSON:
 //!
 //! ```json
 //! {"ok": true,  "command": "discover", "target": null,        "result": []}
@@ -53,6 +54,7 @@ mod discover;
 mod output;
 mod pilot;
 mod target;
+mod watch;
 
 pub use output::{
     HumanRenderer, JsonRenderer, OutputRenderer, colour_on_stderr, colour_on_stdout, render_json,
@@ -323,9 +325,8 @@ impl Report {
 
 /// Supported commands.
 ///
-/// The tree is complete ahead of the implementations so that the surface, the
-/// help text and the JSON contract can settle before commands land against
-/// them.
+/// The tree includes the remaining planned commands so that the surface and
+/// help text stay visible before their implementations land.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
     /// Discover bulbs on the current LAN.
@@ -461,8 +462,8 @@ impl Outcome {
 ///
 /// # Errors
 ///
-/// Whatever the command failed with. Commands that are still stubbed fail
-/// saying so.
+/// Whatever the command failed with. `watch` is handled by [`run`] because it
+/// streams rather than producing one outcome; commands still stubbed say so.
 pub async fn run_command(cli: &Cli) -> anyhow::Result<Outcome> {
     match &cli.command {
         Command::Discover => {
@@ -523,10 +524,10 @@ pub async fn run_command(cli: &Cli) -> anyhow::Result<Outcome> {
             })
             .await
         }
-        other => anyhow::bail!(
-            "`{}` is not implemented yet; this is the CLI scaffold",
-            other.name()
-        ),
+        Command::Watch(_) => {
+            anyhow::bail!("`watch` streams output and must be run as the CLI process")
+        }
+        other => anyhow::bail!("`{}` is not implemented yet", other.name()),
     }
 }
 
@@ -743,8 +744,13 @@ pub fn run() -> ExitCode {
         }
     };
 
-    match runtime.block_on(run_command(&cli)) {
-        Ok(outcome) => {
+    let result = match &cli.command {
+        Command::Watch(target) => runtime.block_on(watch::run(&cli, target)).map(|()| None),
+        _ => runtime.block_on(run_command(&cli)).map(Some),
+    };
+
+    match result {
+        Ok(Some(outcome)) => {
             println!("{}", outcome.render(&cli.command, cli.json));
             if outcome.succeeded() {
                 ExitCode::SUCCESS
@@ -754,6 +760,7 @@ pub fn run() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
+        Ok(None) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!(
                 "{}",

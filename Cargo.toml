@@ -41,6 +41,7 @@ cli = [
     "dep:tracing-subscriber",
     "tokio/rt-multi-thread",
     "tokio/macros",
+    "tokio/signal",
 ]
 
 [[bin]]

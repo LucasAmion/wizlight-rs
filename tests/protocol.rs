@@ -547,11 +547,10 @@ async fn reset_is_assumed_to_behave_like_reboot() {
 #[tokio::test]
 async fn silence_is_still_forgiven_for_reboot_and_reset() {
     // The other half of fire-and-forget: a bulb that really did reboot has an
-    // obvious reason not to answer. Nothing is bound to this address.
-    let dead = {
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
-        socket.local_addr().expect("local_addr")
-    };
+    // obvious reason not to answer. The socket stays bound but unread so no
+    // concurrent test can claim the supposedly silent address and answer.
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+    let dead = silent.local_addr().expect("local_addr");
     let client = Bulb::connect_to(dead)
         .await
         .expect("bind socket")

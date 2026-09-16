@@ -12,8 +12,8 @@ real-time control, and it is the protocol layer underneath
 > request/response transport, discovery, typed pilot/config methods, the
 > rate-limited streaming path and the `syncPilot` push listener are in, and so
 > is the everyday CLI surface — `discover`, `status`, `info`, `on`, `off`,
-> `toggle`, `set` and `scenes`. `watch` and `bench` are still stubbed. The API
-> will change without warning until `0.1.0`.
+> `toggle`, `set`, `scenes` and `watch`. `bench` is still stubbed. The API will
+> change without warning until `0.1.0`.
 >
 > Alphas are published to keep the release path exercised rather than to be
 > depended on, so **every version below has to be spelled out in full**. Cargo
@@ -216,6 +216,7 @@ $ wizlight on 9877d5230f0a --rgb 255,80,0 --brightness 60
 $ wizlight on 9877d5230f0a --rgb 255,80,0 --warm 64   # the fifth emitter too
 $ wizlight on --all --scene "deep dive" --speed 120
 $ wizlight off --all
+$ wizlight watch 9877d5230f0a
 ```
 
 **Address a bulb by MAC, not by IP.** A `<target>` accepts either, but DHCP
@@ -231,7 +232,8 @@ soon as that bulb answers.
 | `scenes <target>` | Only the scenes that bulb's class actually plays |
 | `on` / `off` / `toggle` | `on` also takes `--rgb`, `--hsv`, `--cold`, `--warm`, `--kelvin`, `--scene`, `--speed`, `--brightness` |
 | `set <target>` | The same options, sent as `setState`. It does **not** leave a bulb that was off alone: measured on `ESP25_SHRGB_01` fw 1.38.0, `setState` turns it on exactly as `setPilot` does |
-| `watch` / `bench` | Not yet — they wait on the push listener and the streaming write path |
+| `watch <target>` | Tail `syncPilot` updates until Ctrl-C; human output shows only fields changed since the previous update |
+| `bench` | Not yet — it will measure the streaming write path |
 
 `--all` replaces the target on any of them and fans out to every bulb a scan
 finds, concurrently. One bulb failing does not abort the rest, and does not let
@@ -271,6 +273,8 @@ nothing. Use `off` to go dark and `--brightness` to go dim.
 
   `result` is shaped by the command; under `--all` it is a list of
   `{"target", "ok", "result"}` or `{"target", "ok", "error"}`, one per bulb.
+  `watch --json` is the streaming exception: it writes one envelope per update
+  as newline-delimited JSON, and includes the bulb MAC in each `--all` result.
 - **Exit codes**: `0` success, `1` failed, `2` usage, `3` nothing answered to
   that target, `4` a bulb was there and stopped answering. The last two are
   separate because they call for different reactions — re-scan, or retry.
