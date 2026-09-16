@@ -59,3 +59,13 @@ github-custom-job-permissions = { "publish-crates" = { id-token = "write", conte
 publish-prereleases = true
 # Whether to install an updater program
 install-updater = false
+
+[[dist.extra-artifacts]]
+build = ["sh", "scripts/generate-completions.sh"]
+artifacts = [
+    "target/completions/wizlight.bash",
+    "target/completions/_wizlight",
+    "target/completions/wizlight.fish",
+    "target/completions/wizlight.ps1",
+    "target/completions/wizlight.elv",
+]
