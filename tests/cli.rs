@@ -178,24 +178,15 @@ fn a_json_failure_carries_the_command_and_target() {
 }
 
 #[tokio::test]
-async fn the_push_commands_are_still_stubbed_and_name_themselves() {
-    // `watch` and `bench` wait on the library's push listener and its
-    // rate-limited write path; neither exists yet.
-    let stubbed = [
-        Command::Watch(target("9877d5230f0a")),
-        Command::Bench(target("9877d5230f0a")),
-    ];
+async fn bench_is_still_stubbed_and_names_itself() {
+    let command = Command::Bench(target("9877d5230f0a"));
+    let cli = Cli::try_parse_from(["wizlight", "bench", "9877d5230f0a"]).expect("parses");
+    assert_eq!(cli.command, command);
 
-    for command in stubbed {
-        let name = command.name();
-        let cli = Cli::try_parse_from(["wizlight", name, "9877d5230f0a"]).expect("parses");
-        assert_eq!(cli.command, command);
-
-        let err = run_command(&cli).await.expect_err("still stubbed");
-        let message = err.to_string();
-        assert!(message.contains("not implemented"), "{message}");
-        assert!(message.contains(name), "{message}");
-    }
+    let err = run_command(&cli).await.expect_err("still stubbed");
+    let message = err.to_string();
+    assert!(message.contains("not implemented"), "{message}");
+    assert!(message.contains("bench"), "{message}");
 }
 
 /// A bulb that is there and will not answer, so a command times out rather
