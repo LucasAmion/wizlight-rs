@@ -50,6 +50,7 @@ use if_addrs::IfAddr;
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
 
+mod bench;
 mod describe;
 mod discover;
 mod output;
@@ -57,6 +58,7 @@ mod pilot;
 mod target;
 mod watch;
 
+pub use bench::{Bench, RttStats, StepSummary, rate_steps};
 pub use output::{
     HumanRenderer, JsonRenderer, OutputRenderer, colour_on_stderr, colour_on_stdout, render_json,
 };
@@ -365,8 +367,11 @@ pub enum Command {
     Scenes(Target),
     /// Tail `syncPilot` push updates from a target bulb.
     Watch(Target),
-    /// Benchmark the bulb update rate and latency.
-    Bench(Target),
+    /// Benchmark the bulb update rate, latency and interpolation.
+    #[command(
+        after_long_help = "Examples:\n  wizlight bench 9877d5230f0a\n  wizlight bench 9877d5230f0a --min-rate 5 --max-rate 40 --steps 8 --hold 2\n  wizlight bench 9877d5230f0a --json"
+    )]
+    Bench(Bench),
     /// Generate a completion script for a shell.
     #[command(hide = true)]
     Completions {
@@ -401,12 +406,12 @@ impl Command {
         match self {
             Self::Discover | Self::Completions { .. } => None,
             Self::On(write) | Self::Set(write) => Some(&write.target),
+            Self::Bench(bench) => Some(&bench.target),
             Self::Status(t)
             | Self::Info(t)
             | Self::Off(t)
             | Self::Toggle(t)
             | Self::Scenes(t)
-            | Self::Bench(t)
             | Self::Watch(t) => Some(t),
         }
     }
@@ -547,10 +552,10 @@ pub async fn run_command(cli: &Cli) -> anyhow::Result<Outcome> {
             .await
         }
         Command::Completions { shell } => Ok(completions(*shell)),
+        Command::Bench(bench) => bench::run(cli, bench).await,
         Command::Watch(_) => {
             anyhow::bail!("`watch` streams output and must be run as the CLI process")
         }
-        other => anyhow::bail!("`{}` is not implemented yet", other.name()),
     }
 }
 
@@ -746,6 +751,11 @@ pub fn run() -> ExitCode {
     }
     if let Command::On(write) | Command::Set(write) = &cli.command {
         if let Err(err) = write.options.require_something_lit(&mut Cli::command()) {
+            err.exit();
+        }
+    }
+    if let Command::Bench(bench) = &cli.command {
+        if let Err(err) = bench.validate(&mut Cli::command()) {
             err.exit();
         }
     }

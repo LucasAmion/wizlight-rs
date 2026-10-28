@@ -10,10 +10,10 @@ real-time control, and it is the protocol layer underneath
 
 > **Status: early development, and the published versions are alphas.** The
 > request/response transport, discovery, typed pilot/config methods, the
-> rate-limited streaming path and the `syncPilot` push listener are in, and so
-> is the everyday CLI surface — `discover`, `status`, `info`, `on`, `off`,
-> `toggle`, `set`, `scenes` and `watch`. `bench` is still stubbed. The API will
-> change without warning until `0.1.0`.
+> rate-limited streaming path, the `syncPilot` push listener and the full CLI
+> surface — `discover`, `status`, `info`, `on`, `off`, `toggle`, `set`,
+> `scenes`, `watch` and `bench` — are in. The API will change without warning
+> until `0.1.0`.
 >
 > Alphas are published to keep the release path exercised rather than to be
 > depended on, so **every version below has to be spelled out in full**. Cargo
@@ -233,7 +233,7 @@ soon as that bulb answers.
 | `on` / `off` / `toggle` | `on` also takes `--rgb`, `--hsv`, `--cold`, `--warm`, `--kelvin`, `--scene`, `--speed`, `--brightness` |
 | `set <target>` | The same options, sent as `setState`. It does **not** leave a bulb that was off alone: measured on `ESP25_SHRGB_01` fw 1.38.0, `setState` turns it on exactly as `setPilot` does |
 | `watch <target>` | Tail `syncPilot` updates until Ctrl-C; human output shows only fields changed since the previous update |
-| `bench` | Not yet — it will measure the streaming write path |
+| `bench <target>` | Ramp `setPilot` rate, probe packet-to-photon latency and internal interpolation, and restore the pre-bench state on exit |
 
 `--all` replaces the target on any of them and fans out to every bulb a scan
 finds, concurrently. One bulb failing does not abort the rest, and does not let
