@@ -312,7 +312,7 @@ fn human_field(field: &str, value: Option<&Value>) -> String {
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../tests/common/mock_bulb.rs"]
-mod mock_bulb;
+pub(super) mod mock_bulb;
 
 #[cfg(test)]
 mod tests {
