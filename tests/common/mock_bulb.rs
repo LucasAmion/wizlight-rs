@@ -13,21 +13,38 @@
 //! - Setting colour, temperature or a scene turns the bulb **on**, even if it
 //!   was off, and `setState` behaves exactly like `setPilot` in this. Setting
 //!   only `dimming` does not — an off bulb ignores it completely.
-//! - An out-of-range `dimming` is **silently clamped** and still reports
-//!   success, while a `temp` outside the wire's 1000–12000, a `speed` outside
-//!   10–200, or a `sceneId` outside 1–248 is rejected with `-32602`. The bulb
-//!   cannot be trusted to validate.
+//! - An out-of-range `dimming` is **truncated to its low byte and clamped**
+//!   into `1..=100`, still reporting `success`: `0`, `256`, `512` and `-256`
+//!   read back as `1`; `300` as `44`; `1000`, `65535` and `-1` as `100`.
+//!   `temp` outside the wire's 1000–12000, a `speed` outside 10–200, a `ratio`
+//!   outside 0–100, or a `sceneId` outside 1–248 (and unpopulated `256..=265`)
+//!   is rejected with `-32602`. The bulb cannot be trusted to validate.
+//! - On a single-head bulb (`ESP25_SHRGB_01`), `ratio` in `0..=100` is
+//!   **accepted and silently discarded** — the reply is `success` and `ratio`
+//!   never appears in `getPilot`. By contrast, `devices` on a write accepts
+//!   only `1` and `3` and refuses `0`, `2` and `4` with `-32602`.
+//! - `getPilot` takes a **zero-based** `devices` head index (`0` on a
+//!   single-head bulb; `1`, `2`, `3` are refused with `-32602`) and tags the
+//!   reply **one-based** (`"devices": 1`).
 //! - The accepted `sceneId` range is **wider than the scenes that exist**: all
 //!   of 1–248 is taken, including the ~200 ids naming nothing, so a `success`
-//!   is no evidence a scene ran. `1000` (Rhythm) and the `256..=265` custom
+//!   is no evidence a scene ran. `1000` (Rhythm) and empty `256..=265` custom
 //!   slots are refused, which is the opposite of what `pywizlight` documents.
+//! - `getPilot` carries `speed` only for paced scenes (`1..=5`, `7`, `8`,
+//!   `20..=28`, `30..=33`, `36`, and populated `256..=265`) and `dimming` for
+//!   all scenes except Wake up (`9`), Night light (`14`) and Alarm (`35`).
+//!   Sending `speed` or `dimming` where the active mode does not use it —
+//!   whether in the scene-activation packet or as a bare follow-up write over
+//!   a static scene, an undimmable scene, or `sceneId: 0` (colour/temp) — is
+//!   accepted and silently discarded.
 //! - A `temp` *inside* that wire range but outside the model's own `cctRange`
 //!   is accepted, **clamped into the reported range, and read back clamped**:
 //!   a bulb reporting 2200–6500 answers `success` to 12000 and then reports
 //!   6500. Acceptance is not the same as being honoured, which is why the
 //!   usable range comes from `getModelConfig`.
 //! - Colour, colour temperature and scene are mutually exclusive: setting one
-//!   clears the others.
+//!   clears the others (including dropping `speed` when leaving a paced scene
+//!   for colour or temperature).
 //! - `r`/`g`/`b`/`c`/`w` are **one instruction, not five fields**. A write
 //!   replaces all five, so the channels it leaves out go dark; and the group
 //!   counts only if something in it is non-zero. An all-zero group is
@@ -35,15 +52,21 @@
 //!   even come on — which is why `{"w":0}` draws `-32600` (nothing is left in
 //!   the request) while `{"state":true,"w":0}` succeeds and quietly does
 //!   nothing to the emitters.
-//! - A channel is **truncated to its low byte** rather than range-checked:
-//!   `300` reads back as `44`, `-1` as `255`. This is also all there is to
-//!   `256` being refused — it truncates to `0`, and the rule above does the
-//!   rest.
+//! - Every channel (`r`, `g`, `b`, `c`, `w`) is **truncated to its low byte**
+//!   rather than range-checked: `300` reads back as `44`, `-1` as `255`. This
+//!   is also all there is to `256` being refused — it truncates to `0`, and
+//!   the rule above does the rest.
 //! - A `syncPilot` push can be emitted *before* the reply to the request that
 //!   caused it. Off by default; see [`MockBulb::push_before_ack`].
 //! - A `setPilot` with **no `params` key** is `-32602`, while one with an
-//!   **empty `params` object** is `-32600` — a different code for what looks
-//!   like the same mistake.
+//!   **empty `params` object** or an **unknown parameter key** (such as
+//!   `{"nonsense":1}`) is `-32600` — a different code for what looks like the
+//!   same mistake.
+//! - `reboot` is **refused** with `-32600 Invalid Request` in every spelling of
+//!   `params` (absent, `{}`, `null`), and the bulb carries on answering without
+//!   rebooting. Note the code: `-32601 Method not found` would mean the
+//!   firmware lacked the method, and it does not. `pywizlight` sends `reboot`
+//!   and ignores the reply, which is why nobody noticed.
 //! - Garbage that is not JSON draws `-32700`, in a reply with no `method`.
 //! - `getPower` is **not socket-only**: the RGB personality answers it, always
 //!   with `0`, whatever the bulb is doing.
@@ -56,23 +79,22 @@
 //!   cancelled by an intervening `setPilot` / `setState`). No `"src": "udp"`
 //!   `syncPilot` push is emitted by `pulse`.
 //!
-//! Anything else — `ratio` handling, the lower `dimming` bound, and the config
-//! responses of the five models we do not own — is taken from `pywizlight` or
-//! from the documented parameter ranges and has **not** been confirmed against
-//! hardware.
+//! # Unmodelled (not covered by `docs/captures/`)
 //!
-//! `reboot` used to be the sharpest case of that: this harness answered it with
-//! an invented `{"success": true}`. It has since been measured, and the truth is
-//! neither an acknowledgement nor silence — the bulb **refuses it** with
-//! `-32600 Invalid Request`, in every spelling of `params`, and carries on
-//! answering without rebooting. Note the code: `-32601 Method not found` would
-//! mean the firmware lacked the method, and it does not. `pywizlight` sends
-//! `reboot` and ignores the reply, which is presumably why nobody noticed.
+//! Anything the hardware captures do not cover is left unmodelled and listed
+//! here so the boundary between measured truth and test scaffolding is explicit:
 //!
-//! `reset` is **not** measured and never will be here: it is a factory reset
-//! that unpairs the bulb and clears its Wi-Fi credentials. It is assumed to
-//! behave like `reboot`, and that assumption is the only guess left in this
-//! file's write path.
+//! - `reset` is **not** measured and never will be: it is a factory reset that
+//!   unpairs the bulb and clears its Wi-Fi credentials. It is assumed to return
+//!   `-32600 Invalid Request` like `reboot`.
+//! - Dual-head (`ESP20_DHRGB_01`) behaviour: no dual-head unit is on hand, so
+//!   accepting `devices: 2` on write, `devices: 1` on `getPilot`, and retaining
+//!   `ratio` / `devices` in `Personality::dual_head()` is assumed from
+//!   `pywizlight` rather than measured.
+//! - Fan parameters and the six non-`ESP25_SHRGB_01` config fixtures
+//!   (`ESP01_SHRGB_03`, `ESP14_SHTW1C_01`, `ESP06_SHDW9_01`, `ESP10_SOCKET_06`,
+//!   `ESP03_FANDIMS_31`, `1.8.0`, `ESP20_DHRGB_01`), which are lifted from
+//!   `pywizlight`'s recorded device dumps.
 //!
 //! The bulb binds `0.0.0.0`, not `127.0.0.1`: a loopback-bound socket never
 //! receives broadcast, which discovery tests depend on.
@@ -319,6 +341,7 @@ impl MockBulbBuilder {
             system_config: config(self.personality.system_config, &self.mac),
             kelvin_range: reported_kelvin_range(&model_config, &user_config),
             custom_modes: self.custom_modes,
+            dual_head: self.personality.module_name.contains("_DH"),
             model_config,
             user_config,
             power: self.personality.power.map(|p| config(p, &self.mac)),
@@ -506,6 +529,8 @@ struct Shared {
     /// slot only accepts a write once one has been *saved* into it from the
     /// app, and slots fill in order, so this is a count rather than a set.
     custom_modes: u8,
+    /// Whether the personality has two light heads (`_DH` in `moduleName`).
+    dual_head: bool,
     state: Mutex<State>,
 }
 
@@ -614,13 +639,13 @@ impl Shared {
         }
 
         match method {
-            "getPilot" => {
-                let result = Value::Object(state.pilot.clone());
-                reply(
+            "getPilot" => match read_pilot(&state.pilot, request.get("params"), self.dual_head) {
+                Ok(result) => reply(
                     latency,
                     json!({"method": "getPilot", "env": "pro", "result": result}),
-                )
-            }
+                ),
+                Err((code, message)) => reply(latency, error(method, code, &message)),
+            },
             "getSystemConfig" => reply(latency, self.system_config.clone()),
             "getModelConfig" => reply(latency, self.model_config.clone()),
             "getUserConfig" => reply(latency, self.user_config.clone()),
@@ -669,6 +694,7 @@ impl Shared {
                     request.get("params"),
                     self.kelvin_range,
                     self.custom_modes,
+                    self.dual_head,
                 ) {
                     Err((code, message)) => reply(latency, error(method, code, &message)),
                     Ok(()) => {
@@ -737,6 +763,35 @@ impl Shared {
     }
 }
 
+/// Validates optional `getPilot` params and builds the response payload.
+///
+/// Measured on `ESP25_SHRGB_01` fw 1.38.0: `getPilot` works with no `params`
+/// key or with `{}`. When `devices` is supplied on a read, it is a
+/// **zero-based** head index (`0` accepted on a single-head bulb, `1`/`2`/`3`
+/// refused with `-32602`) and the reply tags the head **one-based**
+/// (`"devices": 1`).
+fn read_pilot(
+    pilot: &Map<String, Value>,
+    params: Option<&Value>,
+    dual_head: bool,
+) -> Result<Value, (i64, String)> {
+    let invalid = || (-32602, "Invalid params".to_owned());
+    let mut result = pilot.clone();
+    let Some(params) = params else {
+        return Ok(Value::Object(result));
+    };
+    let params = params.as_object().ok_or_else(invalid)?;
+    if let Some(devices) = params.get("devices") {
+        let head = devices.as_i64().ok_or_else(invalid)?;
+        let max_head = i64::from(dual_head);
+        if !(0..=max_head).contains(&head) {
+            return Err(invalid());
+        }
+        result.insert("devices".into(), json!(head + 1));
+    }
+    Ok(Value::Object(result))
+}
+
 /// Applies `setPilot` params to the current state, or explains why the bulb
 /// refused.
 ///
@@ -748,14 +803,16 @@ fn apply(
     params: Option<&Value>,
     kelvin_range: Option<(i64, i64)>,
     custom_modes: u8,
+    dual_head: bool,
 ) -> Result<(), (i64, String)> {
     let invalid = || (-32602, "Invalid params".to_owned());
+    let invalid_request = || (-32600, "Invalid Request".to_owned());
     let params = params.and_then(Value::as_object).ok_or_else(invalid)?;
     // Measured: an absent `params` key and an empty one are not the same
     // request. `{"method":"setPilot"}` is invalid *params*; adding `"params":{}`
     // makes it an invalid *request*.
     if params.is_empty() {
-        return Err((-32600, "Invalid Request".to_owned()));
+        return Err(invalid_request());
     }
 
     // Validate everything before touching the state: a rejected request must
@@ -774,7 +831,8 @@ fn apply(
             "r" | "g" | "b" | "c" | "w" => {
                 value.as_i64().ok_or_else(invalid)?;
             }
-            // Measured: 200 comes back as success and is clamped to 100.
+            // Measured: 0 and 101..=255 come back as success and are clamped
+            // into 1..=100.
             "dimming" => {
                 value.as_i64().ok_or_else(invalid)?;
             }
@@ -802,16 +860,40 @@ fn apply(
             }
             // Measured: 9 and 201 are refused, 10 and 200 accepted. Unlike
             // `dimming`, the bulb enforces this one. Whether it also refuses a
-            // `speed` with no animating scene behind it was not tested, so
-            // nothing here pretends to know.
+            // `speed` with no animating scene behind it (`sceneId: 0`) was not
+            // tested, so nothing here pretends to know.
             "speed" => {
                 let v = value.as_i64().ok_or_else(invalid)?;
                 if !(10..=200).contains(&v) {
                     return Err(invalid());
                 }
             }
-            // Not measured; passed through unvalidated rather than guessed at.
-            _ => {}
+            // Measured: 0..=100 is accepted and 101 is refused with -32602. On
+            // a single-head bulb, an accepted `ratio` is silently discarded and
+            // never appears in `getPilot`.
+            "ratio" => {
+                let v = value.as_i64().ok_or_else(invalid)?;
+                if !(0..=100).contains(&v) {
+                    return Err(invalid());
+                }
+            }
+            // Measured: on a single-head bulb, 1 and 3 are accepted while 0, 2
+            // and 4 are refused with -32602. On a dual-head bulb, 2 is also
+            // accepted.
+            "devices" => {
+                let v = value.as_i64().ok_or_else(invalid)?;
+                let valid = if dual_head {
+                    (1..=3).contains(&v)
+                } else {
+                    v == 1 || v == 3
+                };
+                if !valid {
+                    return Err(invalid());
+                }
+            }
+            // Measured: `{"method":"setPilot","params":{"nonsense":1}}` draws
+            // `-32600 Invalid Request`.
+            _ => return Err(invalid_request()),
         }
     }
 
@@ -832,7 +914,7 @@ fn apply(
             .iter()
             .any(|key| byte(params.get(*key).unwrap_or(&Value::Null)) != 0);
     if !sent.is_empty() && !channels && params.len() == sent.len() {
-        return Err((-32600, "Invalid Request".to_owned()));
+        return Err(invalid_request());
     }
 
     let lit = pilot.get("state").and_then(Value::as_bool).unwrap_or(false);
@@ -854,6 +936,7 @@ fn apply(
     // 255,80,0 leaves it showing nothing but the warm white.
     if channels {
         pilot.remove("temp");
+        pilot.remove("speed");
         pilot.insert("sceneId".into(), json!(0));
         for key in colour {
             pilot.insert(key.to_string(), json!(0));
@@ -863,6 +946,7 @@ fn apply(
         for key in colour {
             pilot.remove(key);
         }
+        pilot.remove("speed");
         pilot.insert("sceneId".into(), json!(0));
     }
     if let Some(scene) = params.get("sceneId").and_then(Value::as_i64) {
@@ -880,9 +964,22 @@ fn apply(
         if colour.contains(&key.as_str()) && !channels {
             continue;
         }
+        // Measured on ESP25_SHRGB_01: a single-head bulb accepts `ratio` (0..=100)
+        // and `devices` (1 or 3) on a write and never reports them back in
+        // `getPilot`.
+        if !dual_head && matches!(key.as_str(), "ratio" | "devices") {
+            continue;
+        }
         let value = match (key.as_str(), kelvin_range) {
             ("r" | "g" | "b" | "c" | "w", _) => json!(byte(value)),
-            ("dimming", _) => json!(value.as_i64().unwrap_or(100).clamp(1, 100)),
+            // Measured on ESP25_SHRGB_01 fw 1.38.0: dimming is truncated to
+            // its low eight bits (`value.rem_euclid(256)`), clamped into
+            // 1..=100 (so 0, 256, 512, -256 read back as 1; 300 reads back as
+            // 44; 1000, 65535, -1 read back as 100), and reported clamped.
+            ("dimming", _) => {
+                let raw = value.as_i64().unwrap_or(100).rem_euclid(256);
+                json!(raw.clamp(1, 100))
+            }
             // Measured on ESP25_SHRGB_01 fw 1.38.0, whose reported cctRange is
             // 2200-6500: `temp` is clamped into that range in both directions
             // and reported back clamped — 1000 reads as 2200, 9000 and 12000
@@ -895,9 +992,7 @@ fn apply(
         pilot.insert(key.clone(), value);
     }
 
-    if params.contains_key("sceneId") {
-        shape_scene(pilot);
-    }
+    shape_scene(pilot);
     Ok(())
 }
 
@@ -996,6 +1091,7 @@ fn shape_scene(pilot: &mut Map<String, Value>) {
     pilot.insert("sceneId".into(), json!(scene));
 
     if scene == 0 {
+        pilot.remove("speed");
         return;
     }
     if PACED_SCENES.contains(&scene) || (256..=265).contains(&scene) {

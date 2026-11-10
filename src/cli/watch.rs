@@ -518,9 +518,124 @@ mod tests {
             json_line(&cli, true, "9877d5230f0a", "2026-09-14T12:00:00Z", &pilot).expect("render");
         let value: Value = serde_json::from_str(&line).expect("JSON");
 
-        assert_eq!(value["target"], Value::Null);
-        assert_eq!(value["result"]["target"], "9877d5230f0a");
-        assert_eq!(value["result"]["state"], true);
+        insta::assert_json_snapshot!(value, @r#"
+        {
+          "command": "watch",
+          "ok": true,
+          "result": {
+            "mac": "9877d5230f0a",
+            "state": true,
+            "target": "9877d5230f0a",
+            "timestamp": "2026-09-14T12:00:00Z"
+          },
+          "target": null
+        }
+        "#);
+    }
+
+    #[test]
+    fn watch_human_and_json_renderings_match_snapshots() {
+        let first = serde_json::from_value::<Pilot>(json!({
+            "mac": "9877d5230f0a",
+            "rssi": -55,
+            "src": "wizc1",
+            "state": true,
+            "sceneId": 11,
+            "temp": 2700,
+            "dimming": 100
+        }))
+        .expect("pilot");
+        let second = serde_json::from_value::<Pilot>(json!({
+            "mac": "9877d5230f0a",
+            "rssi": -56,
+            "src": "udp",
+            "state": true,
+            "sceneId": 0,
+            "r": 255,
+            "g": 80,
+            "b": 0,
+            "c": 0,
+            "w": 0,
+            "dimming": 40
+        }))
+        .expect("pilot");
+
+        let line1 = human_line(
+            false,
+            "9877d5230f0a",
+            "2026-11-10T12:00:00.000Z",
+            None,
+            &first,
+        )
+        .unwrap();
+        let line2 = human_line(
+            false,
+            "9877d5230f0a",
+            "2026-11-10T12:00:00.450Z",
+            Some(&first),
+            &second,
+        )
+        .unwrap();
+        let line3 = human_line(
+            false,
+            "9877d5230f0a",
+            "2026-11-10T12:00:01.000Z",
+            Some(&second),
+            &second,
+        )
+        .unwrap();
+        let line_all = human_line(
+            true,
+            "9877d5230f0a",
+            "2026-11-10T12:00:01.500Z",
+            Some(&first),
+            &second,
+        )
+        .unwrap();
+
+        insta::assert_snapshot!(
+            [line1, line2, line3, line_all].join("\n"),
+            @r"
+        2026-11-10T12:00:00.000Z  state=on  r=-  g=-  b=-  c=-  w=-  dimming=100  temp=2700  sceneId=11  effect=-  speed=-  ratio=-  devices=-  rssi=-55  src=wizc1
+        2026-11-10T12:00:00.450Z  r=255  g=80  b=0  c=0  w=0  dimming=40  temp=-  sceneId=0  rssi=-56  src=udp
+        2026-11-10T12:00:01.000Z  no changes
+        2026-11-10T12:00:01.500Z  9877d5230f0a  r=255  g=80  b=0  c=0  w=0  dimming=40  temp=-  sceneId=0  rssi=-56  src=udp
+        "
+        );
+
+        let cli = Cli::try_parse_from(["wizlight", "--json", "watch", "9877d5230f0a"]).unwrap();
+        let single_json: Value = serde_json::from_str(
+            &json_line(
+                &cli,
+                false,
+                "9877d5230f0a",
+                "2026-11-10T12:00:00.450Z",
+                &second,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        insta::assert_json_snapshot!(single_json, @r#"
+        {
+          "command": "watch",
+          "ok": true,
+          "result": {
+            "b": 0,
+            "c": 0,
+            "dimming": 40,
+            "g": 80,
+            "mac": "9877d5230f0a",
+            "r": 255,
+            "rssi": -56,
+            "sceneId": 0,
+            "src": "udp",
+            "state": true,
+            "timestamp": "2026-11-10T12:00:00.450Z",
+            "w": 0
+          },
+          "target": "9877d5230f0a"
+        }
+        "#);
     }
 
     #[tokio::test]
