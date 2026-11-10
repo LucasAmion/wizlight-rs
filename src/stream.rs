@@ -12,12 +12,12 @@ use crate::error::Result;
 use crate::protocol::PilotBuilder;
 use crate::transport::Transport;
 
-/// The unverified default gap between streamed frames: 50 ms, or 20 Hz.
+/// The measured default gap between streamed frames: 200 ms, or 5 Hz.
 ///
-/// This is a placeholder at the upper end of the current 10–20 Hz working
-/// hypothesis. It will be replaced after sustained update rates are measured on
-/// hardware.
-pub const DEFAULT_STREAM_INTERVAL: Duration = Duration::from_millis(50);
+/// Measured on hardware (`ESP25_SHRGB_01` fw 1.38.0): the bulb interpolates
+/// transitions over ~300 ms, and 5 Hz (200 ms spacing) is the physical
+/// zero-skip optical ceiling where 100% of sent updates are visited in order.
+pub const DEFAULT_STREAM_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Rate-limit settings for [`Bulb::stream_with_config`](crate::Bulb::stream_with_config).
 ///
@@ -29,7 +29,7 @@ pub const DEFAULT_STREAM_INTERVAL: Duration = Duration::from_millis(50);
 /// use std::time::Duration;
 /// use wizlight::StreamConfig;
 ///
-/// assert_eq!(StreamConfig::default().min_interval, Duration::from_millis(50));
+/// assert_eq!(StreamConfig::default().min_interval, Duration::from_millis(200));
 /// let unlimited = StreamConfig { min_interval: Duration::ZERO };
 /// assert_eq!(unlimited.min_interval, Duration::ZERO);
 /// ```

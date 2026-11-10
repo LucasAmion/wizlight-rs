@@ -8,14 +8,13 @@ It is a port of the parts of [`pywizlight`][pywizlight] that matter for
 real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
-> **Status: early development, and the published versions are alphas.** The
+> **Status: beta development, and the public API is frozen.** The
 > request/response transport, discovery, typed pilot/config methods, the
-> rate-limited streaming path, the `syncPilot` push listener and the full CLI
-> surface — `discover`, `status`, `info`, `on`, `off`, `toggle`, `set`,
-> `pulse`, `scenes`, `watch` and `bench` — are in. The API will change without
-> warning until `0.1.0`.
+> measured 5 Hz rate-limited streaming path, the `syncPilot` push listener and
+> the full CLI surface — `discover`, `status`, `info`, `on`, `off`, `toggle`,
+> `set`, `pulse`, `scenes`, `watch` and `bench` — are in.
 >
-> Alphas are published to keep the release path exercised rather than to be
+> Prereleases are published to keep the release path exercised rather than to be
 > depended on, so **every version below has to be spelled out in full**. Cargo
 > does not match a prerelease against an ordinary requirement: `wizlight = "0.1"`
 > resolves to nothing, and plain `cargo install wizlight` fails, until `0.1.0`
@@ -51,11 +50,11 @@ unknowns are collected in [`docs/WIZ_PROTOCOL.md`](docs/WIZ_PROTOCOL.md).
 
 ```toml
 [dependencies]
-wizlight = { version = "0.1.0-alpha.4", default-features = false }
+wizlight = { version = "0.1.0-beta.1", default-features = false }
 ```
 
 The prerelease has to be spelled out in full: a plain `"0.1"` requirement does
-not match `0.1.0-alpha.4`, and will keep doing nothing until `0.1.0` ships.
+not match `0.1.0-beta.1`, and will keep doing nothing until `0.1.0` ships.
 
 **`default-features = false` matters.** The `cli` feature is on by default so
 that `cargo install wizlight` produces a working binary, and it pulls in `clap`,
@@ -95,8 +94,8 @@ $ cargo run --example set_colour -- 192.168.0.5
 For real-time producers, create one stream and offer each frame without an
 `.await`. The stream keeps one pending frame, so a producer can never build a
 queue behind the network; if it outruns the rate limit, the newest frame wins.
-The default is an explicitly unverified 20 Hz placeholder until `wizlight bench`
-measures the hardware; use `StreamConfig` to override it.
+The default is the measured 5 Hz (200 ms) zero-skip optical ceiling on
+hardware; use `StreamConfig` to override it.
 
 ```rust,no_run
 use std::net::{IpAddr, Ipv4Addr};
@@ -321,13 +320,13 @@ toolchain is not a prerequisite. Substitute the newest tag from the
 count a prerelease as the latest release.
 
 ```console
-$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-alpha.4/wizlight-installer.sh | sh
+$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-beta.1/wizlight-installer.sh | sh
 ```
 
 On Windows, in PowerShell:
 
 ```console
-> irm https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-alpha.4/wizlight-installer.ps1 | iex
+> irm https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-beta.1/wizlight-installer.ps1 | iex
 ```
 
 Or with Homebrew, on macOS and Linux:
@@ -340,7 +339,7 @@ Or, if you already have [`cargo-binstall`](https://github.com/cargo-bins/cargo-b
 which fetches the same prebuilt archives instead of compiling:
 
 ```console
-$ cargo binstall wizlight --version 0.1.0-alpha.4
+$ cargo binstall wizlight --version 0.1.0-beta.1
 ```
 
 Binaries are built for macOS (Apple Silicon and Intel), Linux (x86-64 and
@@ -358,7 +357,7 @@ form fails outright rather than finding the alpha — the same applies to
 $ cargo install wizlight
 error: could not find `wizlight` in registry `crates-io` with version `*`
 
-$ cargo install wizlight --version 0.1.0-alpha.4
+$ cargo install wizlight --version 0.1.0-beta.1
 ```
 
 Plain `cargo install wizlight` starts working when `0.1.0` ships.

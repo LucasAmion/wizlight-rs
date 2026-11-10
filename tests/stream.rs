@@ -45,8 +45,8 @@ async fn wait_for_set_pilots(bulb: &MockBulb, count: usize) {
 }
 
 #[test]
-fn default_rate_is_the_unmeasured_twenty_hertz_placeholder() {
-    assert_eq!(DEFAULT_STREAM_INTERVAL, Duration::from_millis(50));
+fn default_rate_is_the_measured_five_hertz_ceiling() {
+    assert_eq!(DEFAULT_STREAM_INTERVAL, Duration::from_millis(200));
     assert_eq!(
         StreamConfig::default().min_interval,
         DEFAULT_STREAM_INTERVAL
