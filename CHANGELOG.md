@@ -7,29 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.1] — 2026-11-10
+
+The beta where the public API is frozen following the R1 hardware rate spike and
+`pulse` protocol characterisation. The streaming rate default moves from an
+unverified 20 Hz placeholder to the measured 5 Hz zero-skip optical ceiling on
+hardware.
+
 ### Added
 
+- `pulse` method across the crate and CLI: `Bulb::pulse`, `PulseDelta`,
+  `PulseParams`, `PULSE_SCENE_ID = 248`, `Pilot::effect`, `Pilot::is_pulsing`,
+  and `wizlight pulse <target|--all> --delta <N> --duration <MS>` (with `--json`).
+  Measured on `ESP25_SHRGB_01` fw 1.38.0 to execute transient fades (50–300 ms
+  half-cycle) bypassing the ~300 ms `setPilot` cross-fade ramp.
+- `wizlight bench`: repeatable `setPilot` / `setState` rate sweep, packet-to-photon
+  latency probe and interpolation probe with per-step RTT/jitter/drop statistics,
+  stderr sync markers for high-frame-rate camera timing, pre-bench state
+  restoration, `--rates`, `--mode <auto|rgb|dimming|set-state>`, and
+  `--pulse-durations`.
 - CLI broadcast auto-detection derives one target per viable local IPv4 subnet,
   including multi-homed hosts. Loopback, down, link-local and point-to-point
   interfaces are excluded; repeatable `--broadcast` flags remain an explicit
   override.
-- Complete local-protocol documentation, including measured versus inherited
-  behavior and an explicit placeholder for the remaining streaming-rate spike.
+- Complete local-protocol documentation (`docs/WIZ_PROTOCOL.md`), including
+  measured versus inherited behavior, 120 fps optical benchmark results, and
+  `pulse` characterisation.
 - Runnable discovery and five-channel colour examples, plus additional doc-tests
   for the main configuration, transport, CLI and value-type APIs.
 - Shell completion generation for Bash, Zsh, Fish, PowerShell and Elvish, with
   completion files attached to releases and scene-name suggestions where the
   shell generator supports them.
-- `wizlight bench`: repeatable `setPilot` rate sweep, packet-to-photon latency
-  probe and interpolation probe with per-step RTT/jitter/drop statistics, stderr
-  sync markers for high-frame-rate camera timing, and pre-bench state
-  restoration on exit or Ctrl-C.
 
 ### Changed
 
+- Default streaming interval (`DEFAULT_STREAM_INTERVAL` in `src/stream.rs`)
+  changed from 50 ms (20 Hz placeholder) to 200 ms (5 Hz), matching the
+  physically measured zero-skip optical ceiling.
 - CLI help now starts with the common discovery and control commands, gives
-  examples for `on`, `set` and `bench`, and keeps every command and flag
-  documented.
+  examples for `on`, `set`, `pulse` and `bench`, and keeps every command and
+  flag documented.
 
 ## [0.1.0-alpha.4] — 2026-09-08
 
@@ -402,7 +419,8 @@ is only reachable by asking for `0.1.0-alpha.1` exactly.
   error explaining that.
 
 [light-modes]: https://docs.pro.wizconnected.com/#light-modes
-[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-alpha.4...HEAD
+[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-beta.1...HEAD
+[0.1.0-beta.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-beta.1
 [0.1.0-alpha.4]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.2
