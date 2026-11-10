@@ -60,6 +60,12 @@ publish-prereleases = true
 # Whether to install an updater program
 install-updater = false
 
+# Custom GitHub runners
+#
+# GitHub retired macos-14 on 2026-11-02. Override aarch64-apple-darwin to macos-15.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 [[dist.extra-artifacts]]
 build = ["sh", "scripts/generate-completions.sh"]
 artifacts = [
