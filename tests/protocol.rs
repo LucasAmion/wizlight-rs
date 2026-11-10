@@ -7,8 +7,8 @@ use std::time::Duration;
 use common::mock_bulb::{MockBulb, Personality};
 use serde_json::{Value, json};
 use wizlight::protocol::{
-    BulbClass, Channel, Derivation, Devices, Dimming, Kelvin, KelvinRange, PilotBuilder, Ratio,
-    Scene, SceneId, Speed,
+    BulbClass, Channel, Derivation, Devices, Dimming, Kelvin, KelvinRange, PULSE_SCENE_ID,
+    PilotBuilder, PulseDelta, PulseParams, Ratio, Scene, SceneId, Speed,
 };
 use wizlight::{Bulb, Error, RetryPolicy};
 
@@ -615,6 +615,44 @@ async fn pilot_survives_missing_optional_fields() {
     assert!(pilot.temp.is_none());
     assert!(pilot.r.is_none());
     assert!(pilot.scene_id.is_none());
+}
+
+#[tokio::test]
+async fn pulse_sends_typed_request_reports_effect_and_restores_prior_mode() {
+    let bulb = MockBulb::start().await;
+    let client = connect(&bulb).await;
+
+    // Client-side validation rejects delta=0, delta outside -100..=100, and duration=0
+    // before touching the socket.
+    for (delta, duration) in [(0, 150), (-101, 150), (101, 150), (-50, 0)] {
+        let err = client.pulse(delta, duration).await.unwrap_err();
+        assert!(matches!(err, Error::InvalidParam { .. }), "{err}");
+    }
+    assert!(bulb.requests().is_empty());
+
+    assert_eq!(PulseDelta::new(-80).unwrap().get(), -80);
+    assert_eq!(
+        serde_json::to_value(PulseParams::new(-80, 50).unwrap().request().unwrap()).unwrap(),
+        json!({"method": "pulse", "params": {"delta": -80, "duration": 50}})
+    );
+
+    client.pulse(-80, 50).await.expect("pulse succeeds");
+    assert_eq!(
+        last_request(&bulb),
+        json!({"method": "pulse", "params": {"delta": -80, "duration": 50}})
+    );
+
+    let during = client.get_pilot().await.expect("get_pilot during pulse");
+    assert_eq!(during.scene_id, Some(PULSE_SCENE_ID));
+    assert_eq!(during.effect.as_deref(), Some("pulse"));
+    assert!(during.is_pulsing());
+
+    tokio::time::sleep(Duration::from_millis(140)).await;
+    let after = client.get_pilot().await.expect("get_pilot after pulse");
+    assert_eq!(after.scene_id, Some(11));
+    assert_eq!(after.temp, Some(2700));
+    assert_eq!(after.effect, None);
+    assert!(!after.is_pulsing());
 }
 
 #[tokio::test]

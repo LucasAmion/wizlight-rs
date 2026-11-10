@@ -47,6 +47,14 @@
 //! - Garbage that is not JSON draws `-32700`, in a reply with no `method`.
 //! - `getPower` is **not socket-only**: the RGB personality answers it, always
 //!   with `0`, whatever the bulb is doing.
+//! - `pulse` requires both `delta` and `duration` (omitting either, or sending
+//!   an empty `params` object, draws `-32602`). `delta` is truncated to 16 bits
+//!   and `0` (`±65536`, `±131072`, …) is refused with `-32602`; `duration: 0`
+//!   is likewise refused with `-32602`. While a pulse is running, `getPilot`
+//!   reports `"sceneId": 248` and `"effect": "pulse"` without turning an off
+//!   bulb on, and restores the prior state when the pulse finishes (unless
+//!   cancelled by an intervening `setPilot` / `setState`). No `"src": "udp"`
+//!   `syncPilot` push is emitted by `pulse`.
 //!
 //! Anything else — `ratio` handling, the lower `dimming` bound, and the config
 //! responses of the five models we do not own — is taken from `pywizlight` or
@@ -504,6 +512,8 @@ struct Shared {
 #[derive(Default)]
 struct State {
     pilot: Map<String, Value>,
+    pre_pulse_pilot: Option<Map<String, Value>>,
+    pulse_epoch: u64,
     requests: Vec<String>,
     push_target: Option<SocketAddr>,
     push_port: u16,
@@ -522,6 +532,7 @@ struct Reaction {
     reply: Option<Vec<u8>>,
     push: Option<(SocketAddr, Vec<u8>)>,
     push_first: bool,
+    pulse_timer: Option<(u64, Duration)>,
 }
 
 async fn serve(socket: Arc<UdpSocket>, shared: Arc<Shared>) {
@@ -532,6 +543,18 @@ async fn serve(socket: Arc<UdpSocket>, shared: Arc<Shared>) {
         };
         let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
         let reaction = shared.react(&raw, from);
+        if let Some((epoch, hold)) = reaction.pulse_timer {
+            let shared_timer = Arc::clone(&shared);
+            tokio::spawn(async move {
+                tokio::time::sleep(hold).await;
+                let mut state = shared_timer.state.lock().unwrap();
+                if state.pulse_epoch == epoch {
+                    if let Some(previous) = state.pre_pulse_pilot.take() {
+                        state.pilot = previous;
+                    }
+                }
+            });
+        }
         let socket = Arc::clone(&socket);
         tokio::spawn(async move {
             if let Some(latency) = reaction.latency {
@@ -633,6 +656,7 @@ impl Shared {
                     reply: Some(ack.to_string().into_bytes()),
                     push: push.flatten(),
                     push_first: state.push_first,
+                    pulse_timer: None,
                 }
             }
             // Measured: `reboot` is refused with -32600 in every params shape,
@@ -648,6 +672,9 @@ impl Shared {
                 ) {
                     Err((code, message)) => reply(latency, error(method, code, &message)),
                     Ok(()) => {
+                        state.pre_pulse_pilot = None;
+                        state.pulse_epoch = state.pulse_epoch.wrapping_add(1);
+                        state.pilot.remove("effect");
                         let ack = json!({
                             "method": method,
                             "env": "pro",
@@ -658,10 +685,28 @@ impl Shared {
                             reply: Some(ack.to_string().into_bytes()),
                             push: self.push_from(&state, "udp"),
                             push_first: state.push_first,
+                            pulse_timer: None,
                         }
                     }
                 }
             }
+            "pulse" => match apply_pulse(&mut state, request.get("params")) {
+                Err((code, message)) => reply(latency, error(method, code, &message)),
+                Ok(hold) => {
+                    let ack = json!({
+                        "method": "pulse",
+                        "env": "pro",
+                        "result": {"success": true},
+                    });
+                    Reaction {
+                        latency,
+                        reply: Some(ack.to_string().into_bytes()),
+                        push: None,
+                        push_first: state.push_first,
+                        pulse_timer: Some((state.pulse_epoch, hold)),
+                    }
+                }
+            },
             other => reply(latency, error(other, -32601, "Method not found")),
         }
     }
@@ -854,6 +899,55 @@ fn apply(
         shape_scene(pilot);
     }
     Ok(())
+}
+
+/// Applies `pulse` params to the current state, returning the active hold
+/// duration (`2 * duration` ms, capped to avoid runaway sleeps in tests).
+///
+/// Measured on `ESP25_SHRGB_01` fw 1.38.0:
+/// - Both `delta` and `duration` are required integers; empty or incomplete
+///   `params` draw `-32602 Invalid params`.
+/// - `delta` is truncated to 16 bits and `0` (`0`, `±65536`, `±131072`) is
+///   refused with `-32602`.
+/// - `duration: 0` is refused with `-32602`; `65536` is accepted (32-bit).
+/// - While active, `getPilot` reports `sceneId: 248` and `effect: "pulse"`,
+///   keeps `state` unchanged (an off bulb stays off), and restores the
+///   pre-pulse state when the timer expires.
+fn apply_pulse(state: &mut State, params: Option<&Value>) -> Result<Duration, (i64, String)> {
+    let invalid = || (-32602, "Invalid params".to_owned());
+    let params = params.and_then(Value::as_object).ok_or_else(invalid)?;
+    let delta = params
+        .get("delta")
+        .and_then(Value::as_i64)
+        .ok_or_else(invalid)?;
+    let duration = params
+        .get("duration")
+        .and_then(Value::as_i64)
+        .ok_or_else(invalid)?;
+
+    if delta.rem_euclid(65_536) == 0 || duration == 0 {
+        return Err(invalid());
+    }
+
+    if state.pre_pulse_pilot.is_none() {
+        state.pre_pulse_pilot = Some(state.pilot.clone());
+    }
+    state.pulse_epoch = state.pulse_epoch.wrapping_add(1);
+
+    state.pilot.remove("temp");
+    state.pilot.remove("speed");
+    for key in ["r", "g", "b", "c", "w"] {
+        state.pilot.entry(key.to_owned()).or_insert(json!(0));
+    }
+    state
+        .pilot
+        .entry("dimming".to_owned())
+        .or_insert(json!(100));
+    state.pilot.insert("sceneId".into(), json!(248));
+    state.pilot.insert("effect".into(), json!("pulse"));
+
+    let half_cycle_ms = duration.unsigned_abs().min(30_000);
+    Ok(Duration::from_millis(half_cycle_ms.saturating_mul(2)))
 }
 
 /// Scenes whose rate can be set. Measured: `getPilot` carries `speed` for these

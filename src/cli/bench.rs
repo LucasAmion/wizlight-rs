@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
-use clap::Args;
+use clap::{Args, ValueEnum};
 use serde::Serialize;
 use serde_json::json;
 use tokio::net::UdpSocket;
@@ -38,12 +38,43 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::{Instant, sleep_until, timeout};
 
+use super::pilot::{pulse_delta, pulse_duration_ms};
 use super::{Cli, Outcome, Report, Target, collect, seconds, target};
 use crate::protocol::{
-    BulbType, Channel, Dimming, Kelvin, Pilot, PilotBuilder, Ratio, Request, Response, SceneId,
-    Speed, Success,
+    BulbType, Channel, Dimming, Kelvin, Pilot, PilotBuilder, PulseDelta, PulseParams, Ratio,
+    Request, Response, SceneId, Speed, Success,
 };
 use crate::{Bulb, RetryPolicy};
+
+/// Which payload family `wizlight bench` drives during the rate and step probes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchMode {
+    /// Choose automatically from the bulb's capabilities (`rgb` on colour
+    /// bulbs, `dimming` on white-only bulbs, power toggles on sockets).
+    #[default]
+    Auto,
+    /// Drive full RGB primary changes (`R → G → B` cycle, `red → blue` step)
+    /// via `setPilot`.
+    Rgb,
+    /// Drive brightness-only changes (`20% ↔ 100%` cycle, `10% → 100%` step)
+    /// via `setPilot`.
+    Dimming,
+    /// Drive brightness-only changes (`20% ↔ 100%` cycle, `10% → 100%` step)
+    /// via `setState` instead of `setPilot`.
+    SetState,
+}
+
+impl BenchMode {
+    /// Wire method name used for the rate, latency, and interpolation probes.
+    #[must_use]
+    pub const fn method(self) -> &'static str {
+        match self {
+            Self::Auto | Self::Rgb | Self::Dimming => "setPilot",
+            Self::SetState => "setState",
+        }
+    }
+}
 
 /// Arguments for `wizlight bench`.
 #[derive(Args, Debug, Clone, PartialEq)]
@@ -79,6 +110,17 @@ pub struct Bench {
     )]
     pub steps: usize,
 
+    /// Explicit comma-separated rates in Hz (e.g. `1,2,3,4,5,6,8,10`),
+    /// overriding `--min-rate`, `--max-rate` and `--steps`.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "HZ,...",
+        value_parser = positive_hz,
+        conflicts_with_all = ["min_rate", "max_rate", "steps"]
+    )]
+    pub rates: Vec<f64>,
+
     /// How long to hold each rate step, in seconds.
     #[arg(
         long,
@@ -87,6 +129,30 @@ pub struct Bench {
         value_parser = positive_duration
     )]
     pub hold: Duration,
+
+    /// Payload mode for the rate and interpolation sweeps.
+    #[arg(long, value_enum, default_value_t = BenchMode::Auto, value_name = "MODE")]
+    pub mode: BenchMode,
+
+    /// Run a `pulse` duration sweep across these millisecond durations
+    /// (e.g. `50,100,150,200,300,500`).
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "MS,...",
+        value_parser = pulse_duration_ms
+    )]
+    pub pulse_durations: Vec<u32>,
+
+    /// Brightness delta used for `--pulse-durations` (`-100..=-1` or `1..=100`).
+    #[arg(
+        long,
+        default_value = "-80",
+        allow_hyphen_values = true,
+        value_name = "PERCENT",
+        value_parser = pulse_delta
+    )]
+    pub pulse_delta: PulseDelta,
 }
 
 impl Eq for Bench {}
@@ -99,7 +165,7 @@ impl Bench {
     /// Returns a [`clap::Error`] with [`clap::error::ErrorKind::ArgumentConflict`]
     /// when `min_rate > max_rate`.
     pub fn validate(&self, command: &mut clap::Command) -> Result<(), clap::Error> {
-        if self.min_rate > self.max_rate {
+        if self.rates.is_empty() && self.min_rate > self.max_rate {
             return Err(command.error(
                 clap::error::ErrorKind::ArgumentConflict,
                 format!(
@@ -109,6 +175,28 @@ impl Bench {
             ));
         }
         Ok(())
+    }
+
+    /// Target rate list (in Hz) for this benchmark run.
+    #[must_use]
+    pub fn configured_rates(&self) -> Vec<f64> {
+        if self.rates.is_empty() {
+            rate_steps(self.min_rate, self.max_rate, self.steps)
+        } else {
+            self.rates.iter().copied().map(round2).collect()
+        }
+    }
+
+    /// Rate used for the rapid alternation probe.
+    #[must_use]
+    pub fn alternation_rate(&self) -> f64 {
+        self.rates
+            .iter()
+            .copied()
+            .fold(None, |acc: Option<f64>, r| {
+                Some(acc.map_or(r, |m| m.max(r)))
+            })
+            .unwrap_or(self.max_rate)
     }
 }
 
@@ -186,6 +274,23 @@ pub struct StepSummary {
     pub rtt_ms: Option<RttStats>,
 }
 
+/// Summary of one `pulse` duration probe in `wizlight bench --pulse-durations`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct PulseStepSummary {
+    /// Signed brightness delta sent in `pulse`.
+    pub delta: i32,
+    /// Half-cycle `duration` parameter sent in `pulse`, in milliseconds.
+    pub duration_ms: u32,
+    /// Datagrams handed to the UDP socket (`1`).
+    pub sent: usize,
+    /// Matching `pulse` acknowledgements received (`0` or `1`).
+    pub responses: usize,
+    /// Datagrams without an acknowledgement (`sent - responses`).
+    pub inferred_drops: usize,
+    /// Socket round-trip time in milliseconds, when acknowledged.
+    pub socket_rtt_ms: Option<f64>,
+}
+
 /// Computes the target rates (in Hz) across the configured sweep.
 #[must_use]
 pub fn rate_steps(min_rate: f64, max_rate: f64, steps: usize) -> Vec<f64> {
@@ -202,7 +307,7 @@ pub fn rate_steps(min_rate: f64, max_rate: f64, steps: usize) -> Vec<f64> {
 
 /// Runs `wizlight bench` using stderr for warnings/markers and Ctrl-C for shutdown.
 pub(super) async fn run(cli: &Cli, bench: &Bench) -> anyhow::Result<Outcome> {
-    if bench.min_rate > bench.max_rate {
+    if bench.rates.is_empty() && bench.min_rate > bench.max_rate {
         anyhow::bail!(
             "--min-rate ({}) must not exceed --max-rate ({})",
             bench.min_rate,
@@ -300,6 +405,14 @@ enum VisualMode {
 }
 
 impl VisualMode {
+    fn from_bench_and_bulb(bench_mode: BenchMode, bulb_type: Option<&BulbType>) -> Self {
+        match bench_mode {
+            BenchMode::Rgb => Self::Colour,
+            BenchMode::Dimming | BenchMode::SetState => Self::Dimming,
+            BenchMode::Auto => Self::from_bulb_type(bulb_type),
+        }
+    }
+
     fn from_bulb_type(bulb_type: Option<&BulbType>) -> Self {
         let Some(bulb_type) = bulb_type else {
             return Self::Colour;
@@ -398,7 +511,7 @@ async fn bench_one<W: io::Write>(
 ) -> anyhow::Result<Report> {
     let initial = bulb.get_pilot().await?;
     let bulb_type = bulb.bulb_type().await.ok();
-    let mode = VisualMode::from_bulb_type(bulb_type.as_ref());
+    let mode = VisualMode::from_bench_and_bulb(bench.mode, bulb_type.as_ref());
 
     note(
         stderr,
@@ -428,7 +541,7 @@ async fn bench_one<W: io::Write>(
     .await;
 
     let restored = restore(bulb, &initial).await.is_ok();
-    let (rate_sweep, latency, interpolation) = outcome?;
+    let (rate_sweep, latency, interpolation, pulse_sweep) = outcome?;
 
     Ok(build_report(
         &initial,
@@ -437,6 +550,7 @@ async fn bench_one<W: io::Write>(
         &rate_sweep,
         &latency,
         &interpolation,
+        &pulse_sweep,
         restored,
     ))
 }
@@ -476,8 +590,30 @@ async fn run_phases<W: io::Write>(
     settle: Duration,
     stderr: &Arc<Mutex<W>>,
     stop: &mut watch::Receiver<bool>,
-) -> anyhow::Result<(Vec<StepSummary>, LatencyResult, InterpolationResult)> {
-    let rates = rate_steps(bench.min_rate, bench.max_rate, bench.steps);
+) -> anyhow::Result<(
+    Vec<StepSummary>,
+    LatencyResult,
+    InterpolationResult,
+    Vec<PulseStepSummary>,
+)> {
+    let write_method = bench.mode.method();
+    if mode == VisualMode::Dimming {
+        // Ensure a steady white baseline before running dimming-only sweeps.
+        let baseline = encode_pilot(
+            write_method,
+            &PilotBuilder::new()
+                .state(true)
+                .temp(Kelvin::new(4000).expect("4000 K in range"))
+                .dimming(Dimming::new(100).expect("100 in range")),
+        )?;
+        let _ =
+            send_single_probe(socket, addr, write_method, &baseline, drain_timeout, stop).await?;
+        if pause(settle, stop).await {
+            anyhow::bail!("benchmark interrupted");
+        }
+    }
+
+    let rates = bench.configured_rates();
     let mut summaries = Vec::with_capacity(rates.len());
 
     for (idx, rate_hz) in rates.iter().copied().enumerate() {
@@ -496,9 +632,18 @@ async fn run_phases<W: io::Write>(
             ),
         );
         let payloads: Vec<Vec<u8>> = (0..packet_count)
-            .map(|i| encode_set_pilot(&mode.cycle_frame(i)))
+            .map(|i| encode_pilot(write_method, &mode.cycle_frame(i)))
             .collect::<Result<_, _>>()?;
-        let step = run_paced_burst(socket, addr, rate_hz, &payloads, drain_timeout, stop).await?;
+        let step = run_paced_burst(
+            socket,
+            addr,
+            write_method,
+            rate_hz,
+            &payloads,
+            drain_timeout,
+            stop,
+        )
+        .await?;
         summaries.push(step);
 
         if pause(settle, stop).await {
@@ -512,8 +657,8 @@ async fn run_phases<W: io::Write>(
     } else {
         1
     };
-    let off_payload = encode_set_pilot(&PilotBuilder::new().state(false))?;
-    let white_payload = encode_set_pilot(&mode.white_on())?;
+    let off_payload = encode_pilot(write_method, &PilotBuilder::new().state(false))?;
+    let white_payload = encode_pilot(write_method, &mode.white_on())?;
     let mut latency_rtts = Vec::with_capacity(trials);
     let mut latency_sent = 0usize;
 
@@ -521,7 +666,15 @@ async fn run_phases<W: io::Write>(
         if is_stopped(stop) {
             anyhow::bail!("benchmark interrupted");
         }
-        let _ = send_single_probe(socket, addr, &off_payload, drain_timeout, stop).await?;
+        let _ = send_single_probe(
+            socket,
+            addr,
+            write_method,
+            &off_payload,
+            drain_timeout,
+            stop,
+        )
+        .await?;
         if pause(settle, stop).await {
             anyhow::bail!("benchmark interrupted");
         }
@@ -535,8 +688,15 @@ async fn run_phases<W: io::Write>(
             ),
         );
         latency_sent += 1;
-        if let Some(rtt) =
-            send_single_probe(socket, addr, &white_payload, drain_timeout, stop).await?
+        if let Some(rtt) = send_single_probe(
+            socket,
+            addr,
+            write_method,
+            &white_payload,
+            drain_timeout,
+            stop,
+        )
+        .await?
         {
             latency_rtts.push(rtt);
         }
@@ -556,10 +716,18 @@ async fn run_phases<W: io::Write>(
 
     // Phase 3: Interpolation probe (abrupt step + rapid alternation)
     let (from_builder, to_builder, step_pattern, alt_pattern) = mode.interp_pair();
-    let from_payload = encode_set_pilot(&from_builder)?;
-    let to_payload = encode_set_pilot(&to_builder)?;
+    let from_payload = encode_pilot(write_method, &from_builder)?;
+    let to_payload = encode_pilot(write_method, &to_builder)?;
 
-    let _ = send_single_probe(socket, addr, &from_payload, drain_timeout, stop).await?;
+    let _ = send_single_probe(
+        socket,
+        addr,
+        write_method,
+        &from_payload,
+        drain_timeout,
+        stop,
+    )
+    .await?;
     if pause(settle, stop).await {
         anyhow::bail!("benchmark interrupted");
     }
@@ -571,20 +739,22 @@ async fn run_phases<W: io::Write>(
             utc_timestamp()
         ),
     );
-    let step_rtt = send_single_probe(socket, addr, &to_payload, drain_timeout, stop).await?;
+    let step_rtt =
+        send_single_probe(socket, addr, write_method, &to_payload, drain_timeout, stop).await?;
     let step_samples: Vec<Duration> = step_rtt.into_iter().collect();
     if pause(settle, stop).await {
         anyhow::bail!("benchmark interrupted");
     }
 
+    let alt_rate = bench.alternation_rate();
     let alt_hold = bench.hold.min(Duration::from_secs(1));
-    let alt_count = ((alt_hold.as_secs_f64() * bench.max_rate).round() as usize).max(4);
+    let alt_count = ((alt_hold.as_secs_f64() * alt_rate).round() as usize).max(4);
     note(
         stderr,
         &format!(
             "[{}] {label}  INTERPOLATION_ALT  {alt_pattern} @ {:.2} Hz ({alt_count} packets)",
             utc_timestamp(),
-            bench.max_rate
+            alt_rate
         ),
     );
     let alt_payloads: Vec<Vec<u8>> = (0..alt_count)
@@ -599,7 +769,8 @@ async fn run_phases<W: io::Write>(
     let alt_summary = run_paced_burst(
         socket,
         addr,
-        bench.max_rate,
+        write_method,
+        alt_rate,
         &alt_payloads,
         drain_timeout,
         stop,
@@ -621,12 +792,69 @@ async fn run_phases<W: io::Write>(
         alt_rtt_ms: alt_summary.rtt_ms,
     };
 
-    Ok((summaries, latency, interpolation))
+    // Optional Phase 4: Pulse duration sweep (`--pulse-durations`)
+    let mut pulse_summaries = Vec::with_capacity(bench.pulse_durations.len());
+    if !bench.pulse_durations.is_empty() {
+        let _ = send_single_probe(
+            socket,
+            addr,
+            write_method,
+            &white_payload,
+            drain_timeout,
+            stop,
+        )
+        .await?;
+        if pause(settle, stop).await {
+            anyhow::bail!("benchmark interrupted");
+        }
+
+        let delta = bench.pulse_delta.get();
+        let total_pulses = bench.pulse_durations.len();
+        for (idx, duration_ms) in bench.pulse_durations.iter().copied().enumerate() {
+            if is_stopped(stop) {
+                anyhow::bail!("benchmark interrupted");
+            }
+            let pulse_req = PulseParams::new(delta, duration_ms)?.request()?;
+            let pulse_payload = serde_json::to_vec(&pulse_req)?;
+            note(
+                stderr,
+                &format!(
+                    "[{}] {label}  PULSE_STEP {}/{total_pulses}  delta={delta} duration={duration_ms}ms",
+                    utc_timestamp(),
+                    idx + 1,
+                ),
+            );
+            let rtt = send_single_probe(socket, addr, "pulse", &pulse_payload, drain_timeout, stop)
+                .await?;
+            pulse_summaries.push(PulseStepSummary {
+                delta,
+                duration_ms,
+                sent: 1,
+                responses: usize::from(rtt.is_some()),
+                inferred_drops: usize::from(rtt.is_none()),
+                socket_rtt_ms: rtt.map(|d| round2(d.as_secs_f64() * 1_000.0)),
+            });
+
+            // Wait for the pulse (`2 * duration_ms + settle_margin`) to finish and settle
+            // when running at normal hold times, or `settle` in fast unit tests.
+            let pulse_wait = if bench.hold >= Duration::from_millis(500) {
+                Duration::from_millis(u64::from(duration_ms).saturating_mul(2) + 500)
+            } else {
+                settle
+            };
+            if pause(pulse_wait, stop).await {
+                anyhow::bail!("benchmark interrupted");
+            }
+        }
+    }
+
+    Ok((summaries, latency, interpolation, pulse_summaries))
 }
 
 async fn run_paced_burst(
     socket: &UdpSocket,
     addr: SocketAddr,
+    expected_method: &str,
     rate_hz: f64,
     payloads: &[Vec<u8>],
     drain_timeout: Duration,
@@ -695,7 +923,7 @@ async fn run_paced_burst(
             }
             recv = socket.recv_from(&mut buf) => {
                 if let Ok((n, from)) = recv {
-                    if from == addr && is_set_pilot_ack(&buf[..n]) && matched_idx < sent_times.len() {
+                    if from == addr && is_write_ack(&buf[..n], expected_method) && matched_idx < sent_times.len() {
                         let now = Instant::now();
                         // Expire any sent packet older than drain_timeout before matching FIFO.
                         while matched_idx + 1 < sent_times.len()
@@ -734,6 +962,7 @@ async fn run_paced_burst(
 async fn send_single_probe(
     socket: &UdpSocket,
     addr: SocketAddr,
+    expected_method: &str,
     payload: &[u8],
     drain_timeout: Duration,
     stop: &mut watch::Receiver<bool>,
@@ -757,7 +986,7 @@ async fn send_single_probe(
             }
             res = timeout(deadline.duration_since(now), socket.recv_from(&mut buf)) => {
                 match res {
-                    Ok(Ok((n, from))) if from == addr && is_set_pilot_ack(&buf[..n]) => {
+                    Ok(Ok((n, from))) if from == addr && is_write_ack(&buf[..n], expected_method) => {
                         return Ok(Some(sent_at.elapsed()));
                     }
                     Ok(Ok(_)) => continue,
@@ -768,11 +997,11 @@ async fn send_single_probe(
     }
 }
 
-fn is_set_pilot_ack(bytes: &[u8]) -> bool {
+fn is_write_ack(bytes: &[u8], expected_method: &str) -> bool {
     let Ok(response) = serde_json::from_slice::<Response>(bytes) else {
         return false;
     };
-    if response.method.as_deref() != Some("setPilot") || response.error.is_some() {
+    if response.method.as_deref() != Some(expected_method) || response.error.is_some() {
         return false;
     }
     response
@@ -785,8 +1014,11 @@ fn drain_socket(socket: &UdpSocket) {
     while socket.try_recv_from(&mut buf).is_ok() {}
 }
 
-fn encode_set_pilot(builder: &PilotBuilder) -> anyhow::Result<Vec<u8>> {
-    let request: Request = builder.set_pilot()?;
+fn encode_pilot(method: &str, builder: &PilotBuilder) -> anyhow::Result<Vec<u8>> {
+    let request: Request = match method {
+        "setState" => builder.set_state()?,
+        _ => builder.set_pilot()?,
+    };
     Ok(serde_json::to_vec(&request)?)
 }
 
@@ -863,6 +1095,7 @@ pub async fn restore(bulb: &Bulb, initial: &Pilot) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_report(
     initial: &Pilot,
     bulb_type: Option<&BulbType>,
@@ -870,12 +1103,16 @@ fn build_report(
     rate_sweep: &[StepSummary],
     latency: &LatencyResult,
     interpolation: &InterpolationResult,
+    pulse_sweep: &[PulseStepSummary],
     restored: bool,
 ) -> Report {
     let latency_procedure = "Film the terminal stderr LATENCY_STEP marker and the bulb together at >=120 fps; packet-to-photon latency_ms = (first_lit_frame - marker_frame) * (1000 / fps).";
     let interp_procedure = "At >=120 fps, <=1 intermediate frame on INTERPOLATION_STEP indicates a hardware snap; >=2 monotonic intermediate frames indicates an internal ramp of (frames / fps) seconds. A steady blend during INTERPOLATION_ALT indicates the ramp time constant exceeds 1 / (2 * rate_hz).";
+    let rates = bench.configured_rates();
+    let min_rate_hz = rates.first().copied().unwrap_or(round2(bench.min_rate));
+    let max_rate_hz = rates.last().copied().unwrap_or(round2(bench.max_rate));
 
-    let json = json!({
+    let mut json = json!({
         "device": {
             "mac": initial.mac,
             "model": bulb_type.and_then(|b| b.module_name.as_ref().map(ToString::to_string)),
@@ -884,9 +1121,11 @@ fn build_report(
             "rssi": initial.rssi,
         },
         "config": {
-            "min_rate_hz": round2(bench.min_rate),
-            "max_rate_hz": round2(bench.max_rate),
-            "steps": bench.steps,
+            "mode": bench.mode,
+            "method": bench.mode.method(),
+            "min_rate_hz": min_rate_hz,
+            "max_rate_hz": max_rate_hz,
+            "steps": rates.len(),
             "hold_ms": bench.hold.as_millis() as u64,
         },
         "rate_sweep": rate_sweep,
@@ -920,6 +1159,9 @@ fn build_report(
         },
         "restored": restored,
     });
+    if !pulse_sweep.is_empty() {
+        json["pulse_sweep"] = json!(pulse_sweep);
+    }
 
     let mut lines = Vec::new();
     let model = bulb_type
@@ -994,6 +1236,22 @@ fn build_report(
         interpolation.alt_drops,
         alt_rtt
     ));
+    if !pulse_sweep.is_empty() {
+        let formatted: Vec<String> = pulse_sweep
+            .iter()
+            .map(|p| {
+                let rtt = p
+                    .socket_rtt_ms
+                    .map_or_else(|| "drop".to_owned(), |ms| format!("{ms:.2} ms"));
+                format!("{}ms ({rtt})", p.duration_ms)
+            })
+            .collect();
+        lines.push(format!(
+            "pulse         delta {:+}%  {}",
+            pulse_sweep[0].delta,
+            formatted.join(", ")
+        ));
+    }
     lines.push(format!(
         "restored      {}",
         if restored { "yes" } else { "no" }

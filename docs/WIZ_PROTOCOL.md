@@ -83,6 +83,7 @@ subscriptions.
 | `getPilot` | Read current state | Empty, or zero-based `devices` for a head | `Pilot` |
 | `setPilot` | Apply state | Pilot fields below | `success` |
 | `setState` | Apply state | Same as `setPilot` | `success` |
+| `pulse` | Transient brightness pulse | `delta` and `duration` (ms) | `success` |
 | `getSystemConfig` | Identity, firmware, legacy driver config | Empty | `SystemConfig` |
 | `getModelConfig` | Modern capability ranges | Empty | `ModelConfig` |
 | `getUserConfig` | User and older-firmware white ranges | Empty | `UserConfig` |
@@ -104,7 +105,8 @@ The result is partial and firmware-dependent. Known fields are:
 | `c`, `w` | integer | Cold- and warm-white emitters. |
 | `dimming` | integer | Brightness, normally 1–100. An off bulb may report 0. |
 | `temp` | integer | Active colour temperature in Kelvin. |
-| `sceneId` | integer | Active scene; 0 means no scene. |
+| `sceneId` | integer | Active scene; 0 means no scene, 248 means an active `pulse`. |
+| `effect` | string | Active transient effect name (for example `"pulse"` while a `pulse` is running). |
 | `speed` | integer | Scene speed, only reported when applicable. |
 | `ratio` | integer | Dual-head balance. |
 | `devices` | integer | One-based head tag in the reply. |
@@ -150,6 +152,57 @@ to `getUserConfig.extRange` and then `whiteRange`. The measured RGB bulb reports
 2200–6500 K but accepts the wire endpoints 1000 and 12000, reading them back as
 2200 and 6500. The broad wire range and the useful hardware range answer
 different questions.
+
+### `pulse`
+
+`pulse` executes a transient brightness pulse and automatically restores the
+bulb's prior state when finished:
+
+```json
+{"method":"pulse","params":{"delta":-60,"duration":300}}
+```
+
+Both `delta` and `duration` are required integer fields; omitting either, or
+sending an empty `params` object, draws `-32602 Invalid params`.
+
+| Param | Client range | Measured wire behavior |
+| --- | ---: | --- |
+| `delta` | `-100..=-1`, `1..=100` | Truncated to 16 bits; any value whose low 16 bits are zero (`0`, `±65536`) is refused with `-32602`. |
+| `duration` | `>= 1` ms | `0` is refused with `-32602`. Parsed at 32 bits (`65536` is accepted). Specifies the half-cycle in milliseconds. |
+
+**Measured on `ESP25_SHRGB_01` fw 1.38.0:**
+
+- While a pulse is running, `getPilot` reports `"sceneId": 248` and
+  `"effect": "pulse"` for roughly `2 * duration + 200 ms`, then restores the
+  previous `sceneId`, `temp` or `r`/`g`/`b`/`c`/`w`, `speed`, and `dimming`
+  automatically. This explains why `setPilot`'s `sceneId` wire range check ends
+  at `248`: `248` is the internal slot for `pulse` (writing `sceneId: 248` via
+  `setPilot` still clamps to `41` and does not start a pulse).
+- Works over raw RGB/RGBWW, CCT `temp`, and dynamic scenes (including `Party`,
+  which resumes with its prior `speed` afterwards).
+- Unlike `setPilot` and `setState`, sending `pulse` to an off bulb
+  (`state: false`) does **not** turn the bulb on; it is accepted, reports
+  `state: false, sceneId: 248, effect: "pulse"` for the pulse window, and leaves
+  `state: false` afterward.
+- A second `pulse` sent mid-pulse preempts the running timer and still restores
+  the original pre-pulse state when finished. A `setPilot` sent mid-pulse
+  immediately cancels `effect: "pulse"` and keeps the new state without
+  reverting when the pulse timer expires.
+- Unlike `setPilot` and `setState`, `pulse` does not emit an immediate
+  `"src": "udp"` `syncPilot` push on `:38900`, though a periodic `"src": "hb"`
+  heartbeat that fires during a pulse includes `"sceneId": 248` and
+  `"effect": "pulse"`.
+- **Optical timing (120 fps camera, `delta: -80%`):** unlike `setPilot` and
+  `setState` (which cross-fade over a fixed ~308–317 ms ramp), `pulse` drives
+  the hardware dimmer at the requested `duration` half-cycle. Measured across
+  `duration: [50, 100, 150, 200, 300, 500]` ms:
+  - `50 ms`: `50.0 ms` fade-down (6 frames) + `50.0 ms` fade-up (6 frames) =
+    `100.0 ms` total optical pulse (83% of full modulation depth);
+  - `100 ms`: `91.7 ms` down + `100.0 ms` up = `191.7 ms` total (95% depth);
+  - `150 ms`: `133.3 ms` down + `141.7 ms` up = `275.0 ms` total (96% depth);
+  - `200 ms`: `183.3 ms` down + `191.7 ms` up = `375.0 ms` total (100% depth);
+  - `300 ms`: `275.0 ms` down + `283.3 ms` up = `558.3 ms` total (99% depth);
+  - `500 ms`: `425.0 ms` down + `366.7 ms` up = `791.7 ms` total.
 
 ### Config and maintenance methods
 
@@ -268,7 +321,9 @@ Every id through 41 was written and read back on the measured RGB hardware:
 - `38` and `39` are unnamed static whites measured at 3500 K and 5000 K, named
   “Soft white” and “Crisp white” by this crate;
 - `41` produces roughly 6200 K at about one third of the normal brightness scale;
-- `42..=248` are accepted and silently clamp to 41;
+- `42..=248` are accepted on `setPilot` and silently clamp to 41 (`248` is the
+  internal slot reported alongside `"effect": "pulse"` while a [`pulse`](#pulse)
+  is active);
 - `256..=265` are user slots and work only after the WiZ app has saved a custom
   mode into that slot;
 - `1000` (“Rhythm” in some third-party code) was refused.
@@ -339,8 +394,22 @@ runs at a time because replies have no correlation id.
 a capacity-one pending slot: a newer frame replaces a stale unsent one, so a
 producer never queues behind the network. Shutdown flushes the newest frame.
 
-**Hardware measurement still required:** the maximum sustained update rate
-before visible stutter or loss, packet-to-photon latency, and whether bulbs
-interpolate internally have not been measured. The default 50 ms interval
-(20 Hz) is a working placeholder, not a hardware result. `wizlight bench` will
-fill in these values and replace the placeholder.
+**Measured optical ramp and low-frequency transition knee (120 fps camera on
+`ESP25_SHRGB_01` fw 1.38.0):**
+
+- **Internal cross-fade ramp:** both full RGB `setPilot` steps (`red → blue`)
+  and `dimming`-only steps (`10% → 100%`) cross-fade monotonically over
+  **~308–317 ms** (`37–38 frames` at 120 fps; `10%–90%` transition time
+  ~242 ms). `setState` exhibits the same socket ceiling (~43–50 req/s) and
+  ramp time constant as `setPilot`.
+- **Low-frequency transition knee (`1, 2, 3, 4, 5, 6, 8, 10 Hz`):**
+  - `1..=3 Hz` (`>= 333 ms` spacing): 100% of sent states complete at full
+    rail-to-rail amplitude;
+  - `4..=5 Hz` (`200..250 ms` spacing): 100% of sent states are visited in
+    order without skipping (`6/6` at 4 Hz, `8/8` at 5 Hz), clipped to 60–82% of
+    full swing as each packet reverses the in-flight ramp;
+  - `>= 6 Hz`: intermediate targets begin to be skipped (`8/9` at 6 Hz, `8/12`
+    at 8 Hz, `7/15` at 10 Hz) and the physical transition rate saturates at
+    **~4.7–5.3 Hz**.
+- For transient brightness accents faster than ~300 ms, use [`pulse`](#pulse)
+  (`50..200 ms` half-cycle).

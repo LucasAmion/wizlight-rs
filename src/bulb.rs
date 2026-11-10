@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::protocol::{
-    BulbData, BulbType, KelvinRange, ModelConfig, Pilot, PilotBuilder, Power, Request, Response,
-    Scene, Success, SystemConfig, UserConfig,
+    BulbData, BulbType, KelvinRange, ModelConfig, Pilot, PilotBuilder, Power, PulseParams, Request,
+    Response, Scene, Success, SystemConfig, UserConfig,
 };
 use crate::stream::{BulbStream, StreamConfig};
 use crate::transport::{RetryPolicy, Transport};
@@ -177,6 +177,43 @@ impl Bulb {
     /// As [`set_pilot`](Bulb::set_pilot).
     pub async fn set_state(&self, pilot: &PilotBuilder) -> Result<()> {
         self.write("setState", &pilot.set_state()?).await
+    }
+
+    /// Triggers a transient brightness pulse via `pulse`.
+    ///
+    /// Fades the current light by `delta` (`-100..=-1` or `1..=100` percent)
+    /// over `duration_ms` milliseconds and fades back over `duration_ms`
+    /// milliseconds, restoring the bulb's prior state when finished.
+    ///
+    /// Measured on `ESP25_SHRGB_01` fw 1.38.0:
+    ///
+    /// - While active, `getPilot` reports `sceneId: 248`
+    ///   ([`PULSE_SCENE_ID`](crate::protocol::PULSE_SCENE_ID)) and
+    ///   `effect: "pulse"`.
+    /// - Works over raw RGB/RGBWW, CCT `temp`, and dynamic scenes, restoring
+    ///   the active mode and scene speed afterwards.
+    /// - Unlike [`set_pilot`](Bulb::set_pilot) and
+    ///   [`set_state`](Bulb::set_state), sending `pulse` to an off bulb
+    ///   (`state: false`) does **not** turn it on.
+    ///
+    /// ```no_run
+    /// # use std::net::{IpAddr, Ipv4Addr};
+    /// # use wizlight::Bulb;
+    /// # async fn example() -> Result<(), wizlight::Error> {
+    /// let bulb = Bulb::connect(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 5))).await?;
+    /// bulb.pulse(-80, 150).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidParam`] if `delta` is `0` or outside
+    /// `-100..=100`, or if `duration_ms` is `0`, and otherwise whatever
+    /// [`request`](Bulb::request) returns.
+    pub async fn pulse(&self, delta: i32, duration_ms: u32) -> Result<()> {
+        let params = PulseParams::new(delta, duration_ms)?;
+        self.write("pulse", &params.request()?).await
     }
 
     /// Reads `getSystemConfig`.

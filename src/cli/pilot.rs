@@ -8,7 +8,9 @@ use clap::{Args, error::ErrorKind};
 use serde_json::{Value, json};
 
 use super::Report;
-use crate::protocol::{BulbType, Channel, Dimming, Kelvin, Scene, SceneId, Speed};
+use crate::protocol::{
+    BulbType, Channel, Dimming, Kelvin, PULSE_SCENE_ID, PulseDelta, Scene, SceneId, Speed,
+};
 use crate::{Bulb, Pilot, PilotBuilder};
 
 /// The state options `on` and `set` share.
@@ -326,6 +328,30 @@ pub async fn set(bulb: &Bulb, options: &StateOptions) -> anyhow::Result<Report> 
     Ok(written(true, options))
 }
 
+/// `wizlight pulse <target> --delta <N> --duration <MS>`.
+///
+/// Fades the active light by `delta` (`-100..=-1` or `1..=100`%) over
+/// `duration_ms` ms and fades back over `duration_ms` ms, restoring the bulb's
+/// prior state when finished.
+///
+/// # Errors
+///
+/// Returns an error if the bulb has no brightness control (for example a smart
+/// socket) or if the `pulse` request fails.
+pub async fn pulse(bulb: &Bulb, delta: PulseDelta, duration_ms: u32) -> anyhow::Result<Report> {
+    let bulb_type = bulb.bulb_type().await?;
+    if !bulb_type.features.brightness {
+        anyhow::bail!("{}: it cannot pulse brightness", describe(&bulb_type));
+    }
+    bulb.pulse(delta.get(), duration_ms).await?;
+    let json = json!({
+        "delta": delta.get(),
+        "duration": duration_ms,
+    });
+    let human = format!("pulse {:+}%  {duration_ms} ms", delta.get());
+    Ok(Report::new(json, human))
+}
+
 /// What a write reports back.
 ///
 /// The bulb's acknowledgement carries no state, so this describes the request
@@ -408,13 +434,21 @@ fn describe_pilot(pilot: &Pilot) -> String {
     }];
 
     // Scene first: while one is playing it is what the bulb is doing, and the
-    // colour channels it also reports are the current frame of it.
+    // colour channels it also reports are the current frame of it. `248` is
+    // the internal slot reported alongside `effect: "pulse"` while a transient
+    // pulse is active.
     if let Some(id) = pilot.scene_id.filter(|id| *id != 0) {
         parts.push(match pilot.scene() {
             Some(scene) => format!("scene {} ({id})", scene.name()),
+            None if id == PULSE_SCENE_ID && pilot.effect.as_deref() == Some("pulse") => {
+                format!("effect pulse ({id})")
+            }
             None => format!("scene {id}"),
         });
-    } else {
+    } else if let Some(effect) = &pilot.effect {
+        parts.push(format!("effect {effect}"));
+    }
+    if pilot.scene_id.is_none_or(|id| id == 0) {
         // Only what is lit. Measured on `ESP25_SHRGB_01` fw 1.38.0, a bulb in
         // channel mode reports all five channels on every read, and the ones
         // nothing set read `0` — a white-only bulb reports `rgb 0,0,0` and a
@@ -541,6 +575,25 @@ fn brightness(input: &str) -> Result<Dimming, String> {
         .parse()
         .map_err(|_| format!("`{input}` is not a percentage"))?;
     Dimming::new(value).map_err(|err| err.to_string())
+}
+
+/// Parses a signed non-zero pulse delta (`-100..=-1` or `1..=100`).
+pub(super) fn pulse_delta(input: &str) -> Result<PulseDelta, String> {
+    let value: i32 = input
+        .parse()
+        .map_err(|_| format!("`{input}` is not a signed percentage delta"))?;
+    PulseDelta::new(value).map_err(|err| err.to_string())
+}
+
+/// Parses a non-zero pulse duration in milliseconds (`>= 1`).
+pub(super) fn pulse_duration_ms(input: &str) -> Result<u32, String> {
+    let value: u32 = input
+        .parse()
+        .map_err(|_| format!("`{input}` is not a duration in milliseconds"))?;
+    if value == 0 {
+        return Err("duration must be at least 1 ms, got 0".to_owned());
+    }
+    Ok(value)
 }
 
 #[derive(Clone)]

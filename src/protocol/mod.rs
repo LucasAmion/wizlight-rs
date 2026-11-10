@@ -39,8 +39,10 @@ pub use config::{ModelConfig, Power, SystemConfig, UserConfig};
 pub use model::{
     BulbClass, BulbData, BulbType, Derivation, Features, Heads, KelvinRange, ModuleName,
 };
-pub use pilot::{Pilot, PilotBuilder, PilotParams, Success};
+pub use pilot::{Pilot, PilotBuilder, PilotParams, PulseParams, Success};
 pub use request::Request;
 pub use response::{DeviceError, Response};
 pub use scene::{Adjustable, Category, Scene};
-pub use types::{Channel, Devices, Dimming, Kelvin, Ratio, SceneId, Speed};
+pub use types::{
+    Channel, Devices, Dimming, Kelvin, PULSE_SCENE_ID, PulseDelta, Ratio, SceneId, Speed,
+};
