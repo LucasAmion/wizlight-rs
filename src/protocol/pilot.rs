@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::scene::Scene;
-use super::types::{Channel, Devices, Dimming, Kelvin, Ratio, SceneId, Speed};
+use super::types::{
+    Channel, Devices, Dimming, Kelvin, PULSE_SCENE_ID, PulseDelta, Ratio, SceneId, Speed,
+};
 use crate::error::{Error, Result};
 use crate::protocol::Request;
 
@@ -554,9 +556,15 @@ pub struct Pilot {
     /// Colour temperature in Kelvin, when in white mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temp: Option<u16>,
-    /// Active scene. `0` means "no scene" while RGB is active.
+    /// Active scene. `0` means "no scene" while RGB is active; `248`
+    /// ([`PULSE_SCENE_ID`]) is reported alongside `effect: "pulse"` while a
+    /// [`Bulb::pulse`](crate::Bulb::pulse) is running.
     #[serde(rename = "sceneId", skip_serializing_if = "Option::is_none")]
     pub scene_id: Option<u16>,
+    /// Active transient effect name (for example `"pulse"` while a
+    /// [`Bulb::pulse`](crate::Bulb::pulse) is running).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<String>,
     /// Scene animation speed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<u8>,
@@ -581,15 +589,25 @@ impl Pilot {
     /// absent, or the id is one the table does not carry — a `256..=265` custom
     /// mode made in the app, or a scene a newer firmware added.
     ///
-    /// **A reported `41` is worth recognising.** It is a real scene, a ~6200 K
-    /// white at about a third of normal brightness, and every id from `42` to
-    /// `248` is clamped onto it — so a bulb driven by some other client with an
-    /// out-of-range id ends up sitting there. This crate refuses to *send* it,
-    /// for the reasons on [`SceneId::new`](super::SceneId::new), and so does not
-    /// name it either.
+    /// **A reported `41` or `248` is worth recognising.** `41` is a real scene,
+    /// a ~6200 K white at about a third of normal brightness, and every id from
+    /// `42` to `248` written via `setPilot` is clamped onto it — so a bulb
+    /// driven by some other client with an out-of-range id ends up sitting
+    /// there. `248` ([`PULSE_SCENE_ID`]) is reported alongside
+    /// `"effect": "pulse"` while a [`Bulb::pulse`](crate::Bulb::pulse) is
+    /// running. This crate refuses to *send* either via `setPilot`, for the
+    /// reasons on [`SceneId::new`](super::SceneId::new), and so does not name
+    /// them in the scene table.
     #[must_use]
     pub fn scene(&self) -> Option<Scene> {
         Scene::from_id(self.scene_id?)
+    }
+
+    /// Whether the bulb is currently running a transient [`pulse`](crate::Bulb::pulse)
+    /// (`effect == "pulse"` or `sceneId == 248`).
+    #[must_use]
+    pub fn is_pulsing(&self) -> bool {
+        self.effect.as_deref() == Some("pulse") || self.scene_id == Some(PULSE_SCENE_ID)
     }
 
     /// RGB triple when all three channels are present.
@@ -608,6 +626,65 @@ impl Pilot {
     #[must_use]
     pub fn rgbww(&self) -> Option<(u8, u8, u8, u8, u8)> {
         Some((self.r?, self.g?, self.b?, self.c?, self.w?))
+    }
+}
+
+/// The `params` object of a `pulse` request.
+///
+/// Measured on `ESP25_SHRGB_01` fw 1.38.0: `{"method":"pulse","params":{"delta":-60,"duration":300}}`
+/// fades the active light by `delta` over `duration` ms and fades back over
+/// `duration` ms, reporting `"sceneId": 248` and `"effect": "pulse"` in
+/// `getPilot` while active and automatically restoring the prior state when
+/// finished.
+///
+/// ```
+/// use wizlight::protocol::PulseParams;
+///
+/// let request = PulseParams::new(-60, 300)?.request()?;
+/// assert_eq!(
+///     serde_json::to_value(&request)?,
+///     serde_json::json!({
+///         "method": "pulse",
+///         "params": {"delta": -60, "duration": 300},
+///     }),
+/// );
+/// # Ok::<(), wizlight::Error>(())
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct PulseParams {
+    /// Signed brightness delta (`-100..=-1` or `1..=100`).
+    pub delta: PulseDelta,
+    /// Half-cycle duration in milliseconds (`>= 1`).
+    pub duration: u32,
+}
+
+impl PulseParams {
+    /// Validates `delta` (`-100..=-1` or `1..=100`) and `duration_ms` (`>= 1`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidParam`] if `delta` is `0` or outside
+    /// `-100..=100`, or if `duration_ms` is `0`.
+    pub fn new(delta: i32, duration_ms: u32) -> Result<Self> {
+        let delta = PulseDelta::new(delta)?;
+        if duration_ms == 0 {
+            return Err(Error::InvalidParam {
+                message: "duration must be at least 1 ms, got 0".to_owned(),
+            });
+        }
+        Ok(Self {
+            delta,
+            duration: duration_ms,
+        })
+    }
+
+    /// Serialises into a `pulse` [`Request`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Json`](crate::Error::Json) if serialisation fails.
+    pub fn request(&self) -> Result<Request> {
+        Request::with_params("pulse", self)
     }
 }
 

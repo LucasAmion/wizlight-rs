@@ -157,6 +157,15 @@ open_newtype! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct SceneId(u16);
 
+/// The internal `sceneId` reported by `getPilot` while a [`pulse`](crate::Bulb::pulse)
+/// is active (`"effect": "pulse"`).
+///
+/// Measured on `ESP25_SHRGB_01` fw 1.38.0: this is why `setPilot`'s `sceneId`
+/// wire range check stops at `248` (`1..=248` accepted, `249` refused with
+/// `-32602`). Writing `sceneId: 248` via `setPilot` clamps to `41` rather than
+/// starting a pulse; only the `pulse` method enters slot `248`.
+pub const PULSE_SCENE_ID: u16 = 248;
+
 /// The ids of the ten user slots, `256..=265`.
 const USER_SLOTS: std::ops::RangeInclusive<u16> = 256..=265;
 
@@ -167,7 +176,9 @@ impl SceneId {
     ///
     /// Returns [`Error::UnknownScene`] if the id is not one worth sending.
     /// `37`, `41` and `42..=248` are refused despite being accepted on the
-    /// wire; the message says what each of them really does.
+    /// wire; the message says what each of them really does (`248` is the
+    /// read-side slot reported while a `pulse` is running, and still clamps to
+    /// `41` when written through `setPilot`).
     pub fn new(value: u16) -> Result<Self> {
         if Scene::from_id(value).is_some() || USER_SLOTS.contains(&value) {
             return Ok(Self(value));
@@ -185,7 +196,11 @@ impl SceneId {
                    normal brightness, and no `dimming` recovers the rest, so \
                    send `temp: 6200` instead"
                 .to_owned(),
-            42..=248 => {
+            PULSE_SCENE_ID => " — 248 is the internal slot reported by `getPilot` \
+                   while `pulse` is running; writing it via `setPilot` clamps it \
+                   to 41, so call `Bulb::pulse` instead"
+                .to_owned(),
+            42..=247 => {
                 format!(
                     " — the bulb accepts {value} and silently clamps it to 41, which is \
                      itself refused here"
@@ -359,6 +374,63 @@ bounded_newtype! {
     /// `1`, `2` and `3` are all refused. This type cannot express `0`, and
     /// that is deliberate — reusing it for reads would be wrong.
     Devices(u8), "devices", 1..=3
+}
+
+/// Brightness `delta` for [`Bulb::pulse`](crate::Bulb::pulse), in
+/// `-100..=-1` or `1..=100`.
+///
+/// This is a **client-side policy** for the `1..=100`% dimming scale.
+/// Measured on `ESP25_SHRGB_01` fw 1.38.0: the firmware truncates `delta` to
+/// 16 bits and rejects `0` (including multiples of `65_536` such as `±65_536`)
+/// with `-32602 Invalid params`, while accepting any other non-zero 16-bit
+/// integer (`-65_535..=-1`, `1..=65_535`). Values outside `-100..=100` cannot
+/// move brightness past the `1..=100`% rail, so this constructor bounds them
+/// here.
+///
+/// ```
+/// use wizlight::protocol::PulseDelta;
+///
+/// assert_eq!(PulseDelta::new(-60)?.get(), -60);
+/// assert!(PulseDelta::new(0).is_err());
+/// assert!(PulseDelta::new(-101).is_err());
+/// # Ok::<(), wizlight::Error>(())
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct PulseDelta(i32);
+
+impl PulseDelta {
+    /// The inclusive lower bound (`-100`).
+    pub const MIN: i32 = -100;
+    /// The inclusive upper bound (`100`).
+    pub const MAX: i32 = 100;
+
+    /// Builds a non-zero `delta` in `-100..=100`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidParam`] if `value` is `0` or outside
+    /// `-100..=100`.
+    pub fn new(value: i32) -> Result<Self> {
+        if value != 0 && (Self::MIN..=Self::MAX).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(Error::InvalidParam {
+                message: format!("delta must be in -100..=-1 or 1..=100 (non-zero), got {value}"),
+            })
+        }
+    }
+
+    /// The raw signed percentage delta.
+    #[must_use]
+    pub const fn get(self) -> i32 {
+        self.0
+    }
+}
+
+impl From<PulseDelta> for i32 {
+    fn from(value: PulseDelta) -> Self {
+        value.0
+    }
 }
 
 #[cfg(test)]

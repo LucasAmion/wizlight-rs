@@ -50,6 +50,7 @@ use if_addrs::IfAddr;
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
 
+mod bench;
 mod describe;
 mod discover;
 mod output;
@@ -57,13 +58,14 @@ mod pilot;
 mod target;
 mod watch;
 
+pub use crate::protocol::PulseDelta;
+use crate::{Bulb, Discovery, Error, PORT, RetryPolicy};
+pub use bench::{Bench, BenchMode, PulseStepSummary, RttStats, StepSummary, rate_steps};
 pub use output::{
     HumanRenderer, JsonRenderer, OutputRenderer, colour_on_stderr, colour_on_stdout, render_json,
 };
 pub use pilot::{ColourOptions, StateOptions};
 pub use target::{BadTarget, NotFound, Resolved, TargetSpec};
-
-use crate::{Bulb, Discovery, Error, PORT, RetryPolicy};
 
 /// Exit code for a target that nothing answered to.
 ///
@@ -310,6 +312,32 @@ pub struct Write {
     pub options: StateOptions,
 }
 
+/// Arguments for `wizlight pulse`.
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct Pulse {
+    /// Which bulbs to pulse.
+    #[command(flatten)]
+    pub target: Target,
+
+    /// Brightness delta in percent (`-100..=-1` or `1..=100`).
+    #[arg(
+        long,
+        short = 'd',
+        allow_hyphen_values = true,
+        value_name = "PERCENT",
+        value_parser = pilot::pulse_delta
+    )]
+    pub delta: PulseDelta,
+
+    /// Half-cycle pulse duration in milliseconds (`>= 1`).
+    #[arg(
+        long,
+        value_name = "MS",
+        value_parser = pilot::pulse_duration_ms
+    )]
+    pub duration: u32,
+}
+
 /// One bulb's contribution to a command's output.
 ///
 /// A fan-out collects one of these per bulb; a single target produces one and
@@ -361,12 +389,20 @@ pub enum Command {
     Set(Write),
     /// Toggle the power state of a bulb.
     Toggle(Target),
+    /// Trigger a transient brightness pulse and restore the prior state.
+    #[command(
+        after_long_help = "Examples:\n  wizlight pulse 9877d5230f0a --delta -80 --duration 150\n  wizlight pulse --all --delta -50 --duration 300\n  wizlight pulse 9877d5230f0a --delta 60 --duration 200 --json"
+    )]
+    Pulse(Pulse),
     /// List the scenes supported by the target bulb.
     Scenes(Target),
     /// Tail `syncPilot` push updates from a target bulb.
     Watch(Target),
-    /// Benchmark the bulb update rate and latency.
-    Bench(Target),
+    /// Benchmark the bulb update rate, latency and interpolation.
+    #[command(
+        after_long_help = "Examples:\n  wizlight bench 9877d5230f0a\n  wizlight bench 9877d5230f0a --min-rate 5 --max-rate 40 --steps 8 --hold 2\n  wizlight bench 9877d5230f0a --json"
+    )]
+    Bench(Bench),
     /// Generate a completion script for a shell.
     #[command(hide = true)]
     Completions {
@@ -388,6 +424,7 @@ impl Command {
             Self::Off(_) => "off",
             Self::Toggle(_) => "toggle",
             Self::Set(_) => "set",
+            Self::Pulse(_) => "pulse",
             Self::Scenes(_) => "scenes",
             Self::Watch(_) => "watch",
             Self::Bench(_) => "bench",
@@ -401,12 +438,13 @@ impl Command {
         match self {
             Self::Discover | Self::Completions { .. } => None,
             Self::On(write) | Self::Set(write) => Some(&write.target),
+            Self::Pulse(pulse) => Some(&pulse.target),
+            Self::Bench(bench) => Some(&bench.target),
             Self::Status(t)
             | Self::Info(t)
             | Self::Off(t)
             | Self::Toggle(t)
             | Self::Scenes(t)
-            | Self::Bench(t)
             | Self::Watch(t) => Some(t),
         }
     }
@@ -546,11 +584,19 @@ pub async fn run_command(cli: &Cli) -> anyhow::Result<Outcome> {
             })
             .await
         }
+        Command::Pulse(pulse) => {
+            let delta = pulse.delta;
+            let duration = pulse.duration;
+            act(cli, &pulse.target, move |bulb| async move {
+                pilot::pulse(&bulb, delta, duration).await
+            })
+            .await
+        }
         Command::Completions { shell } => Ok(completions(*shell)),
+        Command::Bench(bench) => bench::run(cli, bench).await,
         Command::Watch(_) => {
             anyhow::bail!("`watch` streams output and must be run as the CLI process")
         }
-        other => anyhow::bail!("`{}` is not implemented yet", other.name()),
     }
 }
 
@@ -746,6 +792,11 @@ pub fn run() -> ExitCode {
     }
     if let Command::On(write) | Command::Set(write) = &cli.command {
         if let Err(err) = write.options.require_something_lit(&mut Cli::command()) {
+            err.exit();
+        }
+    }
+    if let Command::Bench(bench) = &cli.command {
+        if let Err(err) = bench.validate(&mut Cli::command()) {
             err.exit();
         }
     }

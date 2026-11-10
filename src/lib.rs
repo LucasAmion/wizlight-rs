@@ -20,9 +20,9 @@ pub use discovery::{
 pub use error::{Error, Result};
 pub use protocol::{
     Adjustable, BulbClass, BulbData, BulbType, Category, Channel, Derivation, DeviceError, Devices,
-    Dimming, Features, Heads, Kelvin, KelvinRange, ModelConfig, ModuleName, Pilot, PilotBuilder,
-    PilotParams, Power, Ratio, Request, Response, Scene, SceneId, Speed, Success, SystemConfig,
-    UserConfig,
+    Dimming, Features, Heads, Kelvin, KelvinRange, ModelConfig, ModuleName, PULSE_SCENE_ID, Pilot,
+    PilotBuilder, PilotParams, Power, PulseDelta, PulseParams, Ratio, Request, Response, Scene,
+    SceneId, Speed, Success, SystemConfig, UserConfig,
 };
 pub use push::{
     PUSH_KEEPALIVE_INTERVAL, PUSH_PORT, PushEvent, PushManager, PushSubscription, PushUnavailable,

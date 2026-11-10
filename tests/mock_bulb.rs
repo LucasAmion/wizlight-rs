@@ -716,3 +716,79 @@ async fn stops_serving_once_dropped() {
         "a dropped bulb should be off the air"
     );
 }
+
+#[tokio::test]
+async fn pulse_validates_params_sets_scene_248_and_restores_state() {
+    let bulb = MockBulb::start().await;
+    let client = Client::new().await;
+
+    // Missing params, empty params, delta=0, delta=65536 (16-bit truncation to 0), and duration=0
+    // all draw -32602 Invalid params on hardware.
+    for bad in [
+        json!({"method": "pulse"}),
+        json!({"method": "pulse", "params": {}}),
+        json!({"method": "pulse", "params": {"delta": -50}}),
+        json!({"method": "pulse", "params": {"duration": 100}}),
+        json!({"method": "pulse", "params": {"delta": 0, "duration": 100}}),
+        json!({"method": "pulse", "params": {"delta": 65536, "duration": 100}}),
+        json!({"method": "pulse", "params": {"delta": -65536, "duration": 100}}),
+        json!({"method": "pulse", "params": {"delta": -50, "duration": 0}}),
+    ] {
+        let reply = client.ask(bulb.addr(), bad.clone()).await;
+        assert_eq!(reply["error"]["code"], -32602, "{bad}");
+    }
+
+    // Valid pulse enters sceneId 248 + effect "pulse" and restores sceneId 11 when done.
+    let reply = client
+        .ask(
+            bulb.addr(),
+            json!({"method": "pulse", "params": {"delta": -60, "duration": 40}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["success"], true);
+    let during = bulb.pilot();
+    assert_eq!(during["sceneId"], 248);
+    assert_eq!(during["effect"], "pulse");
+
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let after = bulb.pilot();
+    assert_eq!(after["sceneId"], 11);
+    assert_eq!(after["temp"], 2700);
+    assert!(after.get("effect").is_none());
+}
+
+#[tokio::test]
+async fn pulse_on_an_off_bulb_stays_off_and_set_pilot_cancels_pulse() {
+    let bulb = MockBulb::start().await;
+    let client = Client::new().await;
+
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"state": false}}),
+        )
+        .await;
+    let reply = client
+        .ask(
+            bulb.addr(),
+            json!({"method": "pulse", "params": {"delta": 80, "duration": 500}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["success"], true);
+    assert_eq!(bulb.pilot()["state"], false);
+    assert_eq!(bulb.pilot()["sceneId"], 248);
+    assert_eq!(bulb.pilot()["effect"], "pulse");
+
+    // An intervening setPilot cancels the pulse and does not revert when the pulse timer expires.
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"r": 0, "g": 255, "b": 0, "dimming": 60}}),
+        )
+        .await;
+    let after_set = bulb.pilot();
+    assert_eq!(after_set["state"], true);
+    assert_eq!(after_set["sceneId"], 0);
+    assert_eq!(after_set["g"], 255);
+    assert!(after_set.get("effect").is_none());
+}

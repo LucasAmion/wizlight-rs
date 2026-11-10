@@ -57,9 +57,12 @@
 //! - Id **`37` is not a scene.** Writing it is accepted and puts the bulb in
 //!   colour-temperature mode, reporting `sceneId: 0, temp: 2200`. It is an
 //!   alias for a CCT, so [`SceneId`] refuses it and says what to send instead.
-//! - Ids **`42..=248` are accepted and clamped to `41`**. They look valid — the
-//!   bulb answers `success` — and do something no caller asked for, so
-//!   [`SceneId`] refuses them too.
+//! - Ids **`42..=248` are accepted on `setPilot` and clamped to `41`**. They
+//!   look valid — the bulb answers `success` — and do something no caller asked
+//!   for, so [`SceneId`] refuses them too. `248` is the firmware's internal
+//!   slot for [`Bulb::pulse`](crate::Bulb::pulse), reported alongside
+//!   `"effect": "pulse"` in `getPilot` while a pulse is active, which explains
+//!   why `setPilot`'s `sceneId` wire range check ends at `248`.
 //! - The **user slots `256..=265` work**, contradicting an earlier measurement
 //!   here that found `256` refused. The slot was simply empty: saving a custom
 //!   mode in the app makes its id writable, and saving a second one makes `257`

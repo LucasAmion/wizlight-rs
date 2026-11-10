@@ -13,8 +13,8 @@ use super::{Cli, Target, target};
 use crate::{PUSH_PORT, Pilot, PushEvent, PushManager, PushSubscription};
 
 const PILOT_FIELDS: &[&str] = &[
-    "state", "r", "g", "b", "c", "w", "dimming", "temp", "sceneId", "speed", "ratio", "devices",
-    "rssi", "src",
+    "state", "r", "g", "b", "c", "w", "dimming", "temp", "sceneId", "effect", "speed", "ratio",
+    "devices", "rssi", "src",
 ];
 
 pub(super) async fn run(cli: &Cli, selection: &Target) -> anyhow::Result<()> {
@@ -312,7 +312,7 @@ fn human_field(field: &str, value: Option<&Value>) -> String {
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../tests/common/mock_bulb.rs"]
-mod mock_bulb;
+pub(super) mod mock_bulb;
 
 #[cfg(test)]
 mod tests {

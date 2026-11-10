@@ -20,11 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Shell completion generation for Bash, Zsh, Fish, PowerShell and Elvish, with
   completion files attached to releases and scene-name suggestions where the
   shell generator supports them.
+- `wizlight bench`: repeatable `setPilot` rate sweep, packet-to-photon latency
+  probe and interpolation probe with per-step RTT/jitter/drop statistics, stderr
+  sync markers for high-frame-rate camera timing, and pre-bench state
+  restoration on exit or Ctrl-C.
 
 ### Changed
 
 - CLI help now starts with the common discovery and control commands, gives
-  examples for `on` and `set`, and keeps every command and flag documented.
+  examples for `on`, `set` and `bench`, and keeps every command and flag
+  documented.
 
 ## [0.1.0-alpha.4] — 2026-09-08
 

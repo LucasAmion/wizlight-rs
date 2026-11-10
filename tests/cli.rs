@@ -8,7 +8,7 @@ use std::time::Duration;
 use clap::{CommandFactory, Parser};
 use common::mock_bulb::{MockBulb, Personality};
 use serde_json::Value;
-use wizlight::cli::{Cli, Command, Target, render_failure, run_command};
+use wizlight::cli::{Cli, Command, Target, render_failure};
 use wizlight::{DEFAULT_WAIT, RetryPolicy, Scene};
 
 /// Runs the real binary, which is the only way to observe an exit code.
@@ -177,16 +177,256 @@ fn a_json_failure_carries_the_command_and_target() {
     assert_eq!(value["target"], Value::Null);
 }
 
-#[tokio::test]
-async fn bench_is_still_stubbed_and_names_itself() {
-    let command = Command::Bench(target("9877d5230f0a"));
-    let cli = Cli::try_parse_from(["wizlight", "bench", "9877d5230f0a"]).expect("parses");
-    assert_eq!(cli.command, command);
+#[tokio::test(flavor = "multi_thread")]
+async fn bench_ramps_rate_probes_latency_and_interpolation_and_restores_state() {
+    let bulb = MockBulb::builder()
+        .mac("9877d5230f0a")
+        .pilot(serde_json::json!({
+            "mac": "9877d5230f0a",
+            "state": true,
+            "r": 255,
+            "g": 80,
+            "b": 0,
+            "dimming": 40,
+            "sceneId": 0,
+            "rssi": -52
+        }))
+        .start()
+        .await;
+    let addr = bulb.addr().to_string();
 
-    let err = run_command(&cli).await.expect_err("still stubbed");
-    let message = err.to_string();
-    assert!(message.contains("not implemented"), "{message}");
-    assert!(message.contains("bench"), "{message}");
+    let human = against(
+        &bulb,
+        &addr,
+        &[
+            "bench",
+            "--min-rate",
+            "10",
+            "--max-rate",
+            "20",
+            "--steps",
+            "2",
+            "--hold",
+            "0.05",
+        ],
+    )
+    .await;
+    assert_eq!(human.status.code(), Some(0));
+    let stdout = String::from_utf8(human.stdout).expect("utf-8");
+    assert!(stdout.contains("ESP25_SHRGB_01"), "{stdout}");
+    assert!(stdout.contains("rate (Hz)"), "{stdout}");
+    assert!(stdout.contains("latency"), "{stdout}");
+    assert!(stdout.contains("interpolate"), "{stdout}");
+    assert!(stdout.contains("restored      yes"), "{stdout}");
+    let stderr = String::from_utf8(human.stderr).expect("utf-8");
+    assert!(
+        stderr.contains("warning: benchmarking will visibly flash"),
+        "{stderr}"
+    );
+
+    let json = stdout_json(
+        &against(
+            &bulb,
+            &addr,
+            &[
+                "--json",
+                "bench",
+                "--min-rate",
+                "10",
+                "--max-rate",
+                "20",
+                "--steps",
+                "2",
+                "--hold",
+                "0.05",
+            ],
+        )
+        .await,
+    );
+    assert_eq!(json["ok"], Value::Bool(true));
+    assert_eq!(json["command"], "bench");
+    assert_eq!(json["result"]["device"]["model"], "ESP25_SHRGB_01");
+    assert_eq!(json["result"]["restored"], Value::Bool(true));
+    let steps = json["result"]["rate_sweep"].as_array().expect("steps list");
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["rate_hz"], 10.0);
+    assert_eq!(steps[1]["rate_hz"], 20.0);
+    assert!(steps[0]["rtt_ms"]["median"].is_number(), "{steps:?}");
+    assert_eq!(
+        json["result"]["latency_probe"]["pattern"],
+        "black_to_white_step"
+    );
+    assert_eq!(
+        json["result"]["interpolation_probe"]["abrupt_step"]["pattern"],
+        "red_to_blue_step"
+    );
+
+    // Pre-bench state was restored after both runs.
+    let restored = bulb.pilot();
+    assert_eq!(restored["state"], Value::Bool(true));
+    assert_eq!(restored["r"], 255);
+    assert_eq!(restored["g"], 80);
+    assert_eq!(restored["b"], 0);
+    assert_eq!(restored["dimming"], 40);
+}
+
+#[test]
+fn bench_rejects_invalid_rate_and_step_arguments() {
+    for args in [
+        &["bench", "192.168.0.5", "--min-rate", "0"][..],
+        &["bench", "192.168.0.5", "--max-rate", "-5"][..],
+        &["bench", "192.168.0.5", "--steps", "0"][..],
+        &["bench", "192.168.0.5", "--hold", "0"][..],
+        &[
+            "bench",
+            "192.168.0.5",
+            "--min-rate",
+            "40",
+            "--max-rate",
+            "10",
+        ][..],
+        &["bench", "192.168.0.5", "--rates", "0,5"][..],
+        &[
+            "bench",
+            "192.168.0.5",
+            "--rates",
+            "1,2,4",
+            "--min-rate",
+            "1",
+        ][..],
+        &["bench", "192.168.0.5", "--pulse-durations", "0,100"][..],
+        &["bench", "192.168.0.5", "--pulse-delta", "0"][..],
+    ] {
+        let output = wizlight(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bench_supports_explicit_rates_dimming_set_state_and_pulse_sweeps() {
+    let bulb = MockBulb::builder()
+        .mac("9877d5230f0a")
+        .pilot(serde_json::json!({
+            "mac": "9877d5230f0a",
+            "state": true,
+            "sceneId": 11,
+            "temp": 2700,
+            "dimming": 75,
+            "rssi": -50
+        }))
+        .start()
+        .await;
+    let addr = bulb.addr().to_string();
+
+    let json = stdout_json(
+        &against(
+            &bulb,
+            &addr,
+            &[
+                "--json",
+                "bench",
+                "--mode",
+                "set-state",
+                "--rates",
+                "2,4,8",
+                "--hold",
+                "0.05",
+                "--pulse-durations",
+                "50,150",
+                "--pulse-delta",
+                "-60",
+            ],
+        )
+        .await,
+    );
+    assert_eq!(json["ok"], Value::Bool(true));
+    assert_eq!(json["result"]["config"]["mode"], "set_state");
+    assert_eq!(json["result"]["config"]["method"], "setState");
+    let steps = json["result"]["rate_sweep"].as_array().expect("rate steps");
+    let rates: Vec<f64> = steps
+        .iter()
+        .map(|s| s["rate_hz"].as_f64().unwrap())
+        .collect();
+    assert_eq!(rates, vec![2.0, 4.0, 8.0]);
+    assert_eq!(
+        json["result"]["interpolation_probe"]["abrupt_step"]["pattern"],
+        "dim_10_to_100_step"
+    );
+    let pulses = json["result"]["pulse_sweep"]
+        .as_array()
+        .expect("pulse steps");
+    assert_eq!(pulses.len(), 2);
+    assert_eq!(pulses[0]["delta"], -60);
+    assert_eq!(pulses[0]["duration_ms"], 50);
+    assert_eq!(pulses[0]["responses"], 1);
+    assert_eq!(pulses[1]["duration_ms"], 150);
+    assert_eq!(pulses[1]["responses"], 1);
+    assert_eq!(json["result"]["restored"], Value::Bool(true));
+    assert_eq!(bulb.pilot()["sceneId"], 11);
+    assert_eq!(bulb.pilot()["dimming"], 75);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pulse_command_sends_pulse_and_rejects_non_dimmable_devices() {
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    let human = against(
+        &bulb,
+        &addr,
+        &["pulse", "--delta", "-80", "--duration", "150"],
+    )
+    .await;
+    assert_eq!(human.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(human.stdout).unwrap().trim(),
+        "pulse -80%  150 ms"
+    );
+
+    let json = stdout_json(
+        &against(
+            &bulb,
+            &addr,
+            &["--json", "pulse", "--delta", "50", "--duration", "200"],
+        )
+        .await,
+    );
+    assert_eq!(json["ok"], Value::Bool(true));
+    assert_eq!(json["command"], "pulse");
+    assert_eq!(json["result"]["delta"], 50);
+    assert_eq!(json["result"]["duration"], 200);
+
+    // A smart socket has no brightness feature, so `pulse` fails cleanly.
+    let socket = MockBulb::builder()
+        .personality(Personality::socket())
+        .start()
+        .await;
+    let sock_addr = socket.addr().to_string();
+    let failed = against(
+        &socket,
+        &sock_addr,
+        &["pulse", "--delta", "-50", "--duration", "100"],
+    )
+    .await;
+    assert_eq!(failed.status.code(), Some(1));
+    let stderr = String::from_utf8(failed.stderr).unwrap();
+    assert!(stderr.contains("cannot pulse brightness"), "{stderr}");
+
+    // Usage errors for invalid delta or duration.
+    for bad in [
+        &["pulse", "192.168.0.5", "--delta", "0", "--duration", "100"][..],
+        &[
+            "pulse",
+            "192.168.0.5",
+            "--delta",
+            "-101",
+            "--duration",
+            "100",
+        ][..],
+        &["pulse", "192.168.0.5", "--delta", "-50", "--duration", "0"][..],
+    ] {
+        assert_eq!(wizlight(bad).status.code(), Some(2), "{bad:?}");
+    }
 }
 
 /// A bulb that is there and will not answer, so a command times out rather
@@ -961,7 +1201,8 @@ fn help_leaks_no_rustdoc_at_either_length() {
         assert!(!help.contains("Global CLI flags"), "{help}");
         // Every visible subcommand is listed at both lengths.
         for command in [
-            "discover", "status", "on", "off", "info", "set", "toggle", "scenes", "watch", "bench",
+            "discover", "status", "on", "off", "info", "set", "toggle", "pulse", "scenes", "watch",
+            "bench",
         ] {
             assert!(help.contains(command), "{command} missing from {help}");
         }
@@ -998,8 +1239,8 @@ fn help_leaks_no_rustdoc_at_either_length() {
 }
 
 #[test]
-fn on_and_set_long_help_include_working_examples() {
-    for command in ["on", "set"] {
+fn on_set_and_bench_long_help_include_working_examples() {
+    for command in ["on", "set", "pulse", "bench"] {
         let output = wizlight(&[command, "--help"]);
         assert_eq!(output.status.code(), Some(0), "{command}");
         let help = String::from_utf8(output.stdout).expect("utf-8");
