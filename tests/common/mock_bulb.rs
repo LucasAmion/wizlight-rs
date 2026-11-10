@@ -13,11 +13,12 @@
 //! - Setting colour, temperature or a scene turns the bulb **on**, even if it
 //!   was off, and `setState` behaves exactly like `setPilot` in this. Setting
 //!   only `dimming` does not — an off bulb ignores it completely.
-//! - An out-of-range `dimming` (`0` or `101..=255`) is **silently clamped**
-//!   into `1..=100` and still reports `success`, while a `temp` outside the
-//!   wire's 1000–12000, a `speed` outside 10–200, a `ratio` outside 0–100, or a
-//!   `sceneId` outside 1–248 (and unpopulated `256..=265`) is rejected with
-//!   `-32602`. The bulb cannot be trusted to validate.
+//! - An out-of-range `dimming` is **truncated to its low byte and clamped**
+//!   into `1..=100`, still reporting `success`: `0`, `256`, `512` and `-256`
+//!   read back as `1`; `300` as `44`; `1000`, `65535` and `-1` as `100`.
+//!   `temp` outside the wire's 1000–12000, a `speed` outside 10–200, a `ratio`
+//!   outside 0–100, or a `sceneId` outside 1–248 (and unpopulated `256..=265`)
+//!   is rejected with `-32602`. The bulb cannot be trusted to validate.
 //! - On a single-head bulb (`ESP25_SHRGB_01`), `ratio` in `0..=100` is
 //!   **accepted and silently discarded** — the reply is `success` and `ratio`
 //!   never appears in `getPilot`. By contrast, `devices` on a write accepts
@@ -32,8 +33,9 @@
 //! - `getPilot` carries `speed` only for paced scenes (`1..=5`, `7`, `8`,
 //!   `20..=28`, `30..=33`, `36`, and populated `256..=265`) and `dimming` for
 //!   all scenes except Wake up (`9`), Night light (`14`) and Alarm (`35`).
-//!   Sending `speed` or `dimming` where the active scene does not use it —
-//!   whether in the scene-activation packet or as a bare follow-up write — is
+//!   Sending `speed` or `dimming` where the active mode does not use it —
+//!   whether in the scene-activation packet or as a bare follow-up write over
+//!   a static scene, an undimmable scene, or `sceneId: 0` (colour/temp) — is
 //!   accepted and silently discarded.
 //! - A `temp` *inside* that wire range but outside the model's own `cctRange`
 //!   is accepted, **clamped into the reported range, and read back clamped**:
@@ -50,10 +52,10 @@
 //!   even come on — which is why `{"w":0}` draws `-32600` (nothing is left in
 //!   the request) while `{"state":true,"w":0}` succeeds and quietly does
 //!   nothing to the emitters.
-//! - A channel is **truncated to its low byte** rather than range-checked:
-//!   `300` reads back as `44`, `-1` as `255`. This is also all there is to
-//!   `256` being refused — it truncates to `0`, and the rule above does the
-//!   rest.
+//! - Every channel (`r`, `g`, `b`, `c`, `w`) is **truncated to its low byte**
+//!   rather than range-checked: `300` reads back as `44`, `-1` as `255`. This
+//!   is also all there is to `256` being refused — it truncates to `0`, and
+//!   the rule above does the rest.
 //! - A `syncPilot` push can be emitted *before* the reply to the request that
 //!   caused it. Off by default; see [`MockBulb::push_before_ack`].
 //! - A `setPilot` with **no `params` key** is `-32602`, while one with an
@@ -85,14 +87,6 @@
 //! - `reset` is **not** measured and never will be: it is a factory reset that
 //!   unpairs the bulb and clears its Wi-Fi credentials. It is assumed to return
 //!   `-32600 Invalid Request` like `reboot`.
-//! - A bare `speed` write when `sceneId == 0` (colour or temperature mode with
-//!   no scene active) was not probed on hardware (`scenes-…json` probed `speed`
-//!   with a static scene, over a running dynamic scene, over a running static
-//!   scene, and on a user slot).
-//! - Out-of-byte truncation (`300` → `44`, `256` → `0`, `-1` → `255`) was swept
-//!   on `c` and `w`; `r`, `g` and `b` are assumed to share the same parser.
-//! - `dimming` outside `0..=255` (negative or `> 255`) was not probed; only
-//!   `u8` bounds (`0`, `1`, `100`, `101`, `255`) were measured.
 //! - Dual-head (`ESP20_DHRGB_01`) behaviour: no dual-head unit is on hand, so
 //!   accepting `devices: 2` on write, `devices: 1` on `getPilot`, and retaining
 //!   `ratio` / `devices` in `Personality::dual_head()` is assumed from
@@ -978,7 +972,14 @@ fn apply(
         }
         let value = match (key.as_str(), kelvin_range) {
             ("r" | "g" | "b" | "c" | "w", _) => json!(byte(value)),
-            ("dimming", _) => json!(value.as_i64().unwrap_or(100).clamp(1, 100)),
+            // Measured on ESP25_SHRGB_01 fw 1.38.0: dimming is truncated to
+            // its low eight bits (`value.rem_euclid(256)`), clamped into
+            // 1..=100 (so 0, 256, 512, -256 read back as 1; 300 reads back as
+            // 44; 1000, 65535, -1 read back as 100), and reported clamped.
+            ("dimming", _) => {
+                let raw = value.as_i64().unwrap_or(100).rem_euclid(256);
+                json!(raw.clamp(1, 100))
+            }
             // Measured on ESP25_SHRGB_01 fw 1.38.0, whose reported cctRange is
             // 2200-6500: `temp` is clamped into that range in both directions
             // and reported back clamped — 1000 reads as 2200, 9000 and 12000
@@ -1090,6 +1091,7 @@ fn shape_scene(pilot: &mut Map<String, Value>) {
     pilot.insert("sceneId".into(), json!(scene));
 
     if scene == 0 {
+        pilot.remove("speed");
         return;
     }
     if PACED_SCENES.contains(&scene) || (256..=265).contains(&scene) {

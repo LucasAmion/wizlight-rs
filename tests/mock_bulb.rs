@@ -69,8 +69,8 @@ async fn records_the_exact_bytes_received() {
 
 #[tokio::test]
 async fn out_of_range_dimming_is_clamped_not_rejected() {
-    // Measured on hardware: the bulb reports success and quietly clamps into
-    // 1..=100, which is why the crate has to validate ranges itself.
+    // Measured on hardware: dimming is truncated to its low eight bits and
+    // clamped into 1..=100.
     let bulb = MockBulb::start().await;
     let client = Client::new().await;
 
@@ -81,6 +81,12 @@ async fn out_of_range_dimming_is_clamped_not_rejected() {
         (101, 100),
         (200, 100),
         (255, 100),
+        (-1, 100),
+        (256, 1),
+        (300, 44),
+        (1000, 100),
+        (65535, 100),
+        (65536, 1),
     ] {
         let reply = client
             .ask(
@@ -829,16 +835,18 @@ async fn channel_group_replaces_all_five_truncates_to_low_byte_and_discards_all_
     assert_eq!(bulb.pilot()["c"], 0);
     assert_eq!(bulb.pilot()["w"], 128);
 
-    // Out-of-byte values truncate to their low eight bits.
-    for (sent, reported) in [(300, 44), (1000, 232), (65535, 255), (-1, 255)] {
-        let reply = client
-            .ask(
-                bulb.addr(),
-                json!({"method": "setPilot", "params": {"w": sent}}),
-            )
-            .await;
-        assert_eq!(reply["result"]["success"], true, "w={sent}");
-        assert_eq!(bulb.pilot()["w"], reported, "w={sent}");
+    // Out-of-byte values truncate to their low eight bits across all channels.
+    for channel_key in ["r", "g", "b", "c", "w"] {
+        for (sent, reported) in [(300, 44), (1000, 232), (65535, 255), (-1, 255)] {
+            let reply = client
+                .ask(
+                    bulb.addr(),
+                    json!({"method": "setPilot", "params": {channel_key: sent}}),
+                )
+                .await;
+            assert_eq!(reply["result"]["success"], true, "{channel_key}={sent}");
+            assert_eq!(bulb.pilot()[channel_key], reported, "{channel_key}={sent}");
+        }
     }
 
     // Set w=128 before probing all-zero groups so we can prove they do not overwrite it.
@@ -975,6 +983,27 @@ async fn speed_bounds_and_bare_speed_or_dimming_follow_the_running_scene() {
         bulb.pilot().get("speed").is_none(),
         "bare speed on static scene 11 is discarded"
     );
+
+    // Bare speed over colour or temp mode (sceneId: 0) is also accepted and discarded.
+    for mode_params in [json!({"r": 255, "g": 0, "b": 0}), json!({"temp": 4000})] {
+        client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": mode_params}),
+            )
+            .await;
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"speed": 150}}),
+            )
+            .await;
+        assert_eq!(reply["result"]["success"], true);
+        assert!(
+            bulb.pilot().get("speed").is_none(),
+            "bare speed on sceneId: 0 is discarded"
+        );
+    }
 
     // Bare dimming over an undimmable scene (14, Night light) is accepted and discarded.
     client
