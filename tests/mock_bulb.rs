@@ -69,20 +69,29 @@ async fn records_the_exact_bytes_received() {
 
 #[tokio::test]
 async fn out_of_range_dimming_is_clamped_not_rejected() {
-    // Measured on hardware: the bulb reports success and quietly clamps, which
-    // is why the crate has to validate ranges itself.
+    // Measured on hardware: the bulb reports success and quietly clamps into
+    // 1..=100, which is why the crate has to validate ranges itself.
     let bulb = MockBulb::start().await;
     let client = Client::new().await;
 
-    let reply = client
-        .ask(
-            bulb.addr(),
-            json!({"method": "setPilot", "params": {"dimming": 200}}),
-        )
-        .await;
+    for (sent, clamped) in [
+        (0, 1),
+        (1, 1),
+        (100, 100),
+        (101, 100),
+        (200, 100),
+        (255, 100),
+    ] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"dimming": sent}}),
+            )
+            .await;
 
-    assert_eq!(reply["result"]["success"], true);
-    assert_eq!(bulb.pilot()["dimming"], 100);
+        assert_eq!(reply["result"]["success"], true, "dimming {sent}");
+        assert_eq!(bulb.pilot()["dimming"], clamped, "dimming {sent}");
+    }
 }
 
 #[tokio::test]
@@ -791,4 +800,298 @@ async fn pulse_on_an_off_bulb_stays_off_and_set_pilot_cancels_pulse() {
     assert_eq!(after_set["sceneId"], 0);
     assert_eq!(after_set["g"], 255);
     assert!(after_set.get("effect").is_none());
+}
+
+#[tokio::test]
+async fn channel_group_replaces_all_five_truncates_to_low_byte_and_discards_all_zero() {
+    let bulb = MockBulb::start().await;
+    let client = Client::new().await;
+
+    // A channel write replaces all five: omitted channels go to 0.
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"r": 255, "g": 80, "b": 0}}),
+        )
+        .await;
+    assert_eq!(bulb.pilot()["r"], 255);
+    assert_eq!(bulb.pilot()["w"], 0);
+
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"w": 128}}),
+        )
+        .await;
+    assert_eq!(bulb.pilot()["r"], 0, "colour replaced by warm white");
+    assert_eq!(bulb.pilot()["g"], 0);
+    assert_eq!(bulb.pilot()["b"], 0);
+    assert_eq!(bulb.pilot()["c"], 0);
+    assert_eq!(bulb.pilot()["w"], 128);
+
+    // Out-of-byte values truncate to their low eight bits.
+    for (sent, reported) in [(300, 44), (1000, 232), (65535, 255), (-1, 255)] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"w": sent}}),
+            )
+            .await;
+        assert_eq!(reply["result"]["success"], true, "w={sent}");
+        assert_eq!(bulb.pilot()["w"], reported, "w={sent}");
+    }
+
+    // Set w=128 before probing all-zero groups so we can prove they do not overwrite it.
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"w": 128}}),
+        )
+        .await;
+
+    // An all-zero channel group alone (including 256, which truncates to 0) draws -32600.
+    for bad in [
+        json!({"method": "setPilot", "params": {"w": 0}}),
+        json!({"method": "setPilot", "params": {"c": 0}}),
+        json!({"method": "setPilot", "params": {"r": 0, "g": 0, "b": 0}}),
+        json!({"method": "setState", "params": {"w": 0}}),
+        json!({"method": "setPilot", "params": {"w": 256}}),
+    ] {
+        let reply = client.ask(bulb.addr(), bad.clone()).await;
+        assert_eq!(reply["error"]["code"], -32600, "{bad}");
+        assert_eq!(
+            bulb.pilot()["w"],
+            128,
+            "refused write leaves w=128 untouched"
+        );
+    }
+
+    // Alongside another valid field, an all-zero channel group is discarded whole while the
+    // surviving field applies.
+    let reply = client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"state": true, "w": 0}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["success"], true);
+    assert_eq!(bulb.pilot()["w"], 128, "all-zero group discarded");
+
+    let reply = client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"dimming": 40, "c": 0, "w": 0}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["success"], true);
+    assert_eq!(bulb.pilot()["dimming"], 40);
+    assert_eq!(bulb.pilot()["w"], 128, "all-zero group still discarded");
+}
+
+#[tokio::test]
+async fn speed_bounds_and_bare_speed_or_dimming_follow_the_running_scene() {
+    let bulb = MockBulb::builder().custom_modes(1).start().await;
+    let client = Client::new().await;
+
+    // Speed wire bounds: 10..=200 accepted, 9 and 201 refused with -32602.
+    for bad in [0, 9, 201, 255] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"sceneId": 4, "speed": bad}}),
+            )
+            .await;
+        assert_eq!(reply["error"]["code"], -32602, "speed {bad}");
+    }
+
+    // Bare speed over a running dynamic scene (4) or user slot (256) is honoured.
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"sceneId": 4, "speed": 100}}),
+        )
+        .await;
+    let reply = client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"speed": 150}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["success"], true);
+    assert_eq!(bulb.pilot()["speed"], 150);
+
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"sceneId": 256, "speed": 20}}),
+        )
+        .await;
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"speed": 180}}),
+        )
+        .await;
+    assert_eq!(bulb.pilot()["speed"], 180);
+
+    // Switching from a dynamic scene to temp or colour drops `speed` from getPilot.
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"temp": 4000}}),
+        )
+        .await;
+    assert!(bulb.pilot().get("speed").is_none(), "temp drops speed");
+
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"sceneId": 4, "speed": 120}}),
+        )
+        .await;
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"r": 255, "g": 0, "b": 0}}),
+        )
+        .await;
+    assert!(bulb.pilot().get("speed").is_none(), "colour drops speed");
+
+    // Bare speed over a running static scene (11) is accepted and discarded.
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"sceneId": 11}}),
+        )
+        .await;
+    let reply = client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"speed": 150}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["success"], true);
+    assert!(
+        bulb.pilot().get("speed").is_none(),
+        "bare speed on static scene 11 is discarded"
+    );
+
+    // Bare dimming over an undimmable scene (14, Night light) is accepted and discarded.
+    client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"sceneId": 14}}),
+        )
+        .await;
+    let reply = client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"dimming": 30}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["success"], true);
+    assert!(
+        bulb.pilot().get("dimming").is_none(),
+        "bare dimming on Night light is discarded"
+    );
+}
+
+#[tokio::test]
+async fn ratio_and_devices_validate_bounds_and_discard_or_refuse_on_single_head() {
+    let bulb = MockBulb::start().await;
+    let client = Client::new().await;
+
+    // ratio wire range is 0..=100; on a single-head bulb it is accepted and discarded.
+    for ok in [0, 50, 75, 100] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"ratio": ok}}),
+            )
+            .await;
+        assert_eq!(reply["result"]["success"], true, "ratio {ok}");
+        assert!(
+            bulb.pilot().get("ratio").is_none(),
+            "single-head bulb discards ratio {ok}"
+        );
+    }
+    for bad in [-1, 101] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"ratio": bad}}),
+            )
+            .await;
+        assert_eq!(reply["error"]["code"], -32602, "ratio {bad}");
+    }
+
+    // devices on write: 1 and 3 accepted on single-head; 0, 2 and 4 refused with -32602.
+    for ok in [1, 3] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"devices": ok, "dimming": 50}}),
+            )
+            .await;
+        assert_eq!(reply["result"]["success"], true, "write devices {ok}");
+        assert!(bulb.pilot().get("devices").is_none());
+    }
+    for bad in [0, 2, 4] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "setPilot", "params": {"devices": bad, "dimming": 50}}),
+            )
+            .await;
+        assert_eq!(reply["error"]["code"], -32602, "write devices {bad}");
+    }
+
+    // devices on read (getPilot): zero-based head index, one-based tag in reply.
+    let bare_read = client.ask(bulb.addr(), json!({"method": "getPilot"})).await;
+    assert_eq!(bare_read["result"]["mac"], bulb.mac());
+    assert!(bare_read["result"].get("devices").is_none());
+
+    let head_zero = client
+        .ask(
+            bulb.addr(),
+            json!({"method": "getPilot", "params": {"devices": 0}}),
+        )
+        .await;
+    assert_eq!(head_zero["result"]["devices"], 1);
+
+    for bad in [-1, 1, 2, 3] {
+        let reply = client
+            .ask(
+                bulb.addr(),
+                json!({"method": "getPilot", "params": {"devices": bad}}),
+            )
+            .await;
+        assert_eq!(reply["error"]["code"], -32602, "read devices {bad}");
+    }
+}
+
+#[tokio::test]
+async fn unknown_pilot_params_and_reboot_return_invalid_request_32600() {
+    let bulb = MockBulb::start().await;
+    let client = Client::new().await;
+
+    let reply = client
+        .ask(
+            bulb.addr(),
+            json!({"method": "setPilot", "params": {"nonsense": 1}}),
+        )
+        .await;
+    assert_eq!(reply["error"]["code"], -32600);
+    assert_eq!(reply["error"]["message"], "Invalid Request");
+    assert!(bulb.pilot().get("nonsense").is_none());
+
+    for reboot in [
+        json!({"method": "reboot"}),
+        json!({"method": "reboot", "params": {}}),
+        json!({"method": "reboot", "params": null}),
+    ] {
+        let reply = client.ask(bulb.addr(), reboot.clone()).await;
+        assert_eq!(reply["error"]["code"], -32600, "{reboot}");
+        assert_eq!(reply["error"]["message"], "Invalid Request", "{reboot}");
+    }
 }

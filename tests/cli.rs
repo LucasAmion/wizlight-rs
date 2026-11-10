@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
 use common::mock_bulb::{MockBulb, Personality};
-use serde_json::Value;
+use insta::{assert_json_snapshot, assert_snapshot};
+use serde_json::{Value, json};
 use wizlight::cli::{Cli, Command, Target, render_failure};
 use wizlight::{DEFAULT_WAIT, RetryPolicy, Scene};
 
@@ -158,23 +159,33 @@ fn output_renderer_formats_typed_data_as_json() {
 #[test]
 fn a_human_failure_is_a_plain_line_not_json() {
     let rendered = render_failure(Some(&Command::Status(target("1.2.3.4"))), "boom", false);
-    assert_eq!(rendered, "error: boom");
+    assert_snapshot!(rendered, @"error: boom");
 }
 
 #[test]
 fn a_json_failure_carries_the_command_and_target() {
     let rendered = render_failure(Some(&Command::Status(target("1.2.3.4"))), "boom", true);
     let value: Value = serde_json::from_str(&rendered).expect("valid JSON");
-    assert_eq!(value["ok"], Value::Bool(false));
-    assert_eq!(value["command"], "status");
-    assert_eq!(value["target"], "1.2.3.4");
-    assert_eq!(value["error"], "boom");
+    assert_json_snapshot!(value, @r#"
+    {
+      "command": "status",
+      "error": "boom",
+      "ok": false,
+      "target": "1.2.3.4"
+    }
+    "#);
 
     // A command with no target still produces the key, as null.
     let rendered = render_failure(Some(&Command::Discover), "boom", true);
     let value: Value = serde_json::from_str(&rendered).expect("valid JSON");
-    assert_eq!(value["command"], "discover");
-    assert_eq!(value["target"], Value::Null);
+    assert_json_snapshot!(value, @r#"
+    {
+      "command": "discover",
+      "error": "boom",
+      "ok": false,
+      "target": null
+    }
+    "#);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -224,7 +235,7 @@ async fn bench_ramps_rate_probes_latency_and_interpolation_and_restores_state() 
         "{stderr}"
     );
 
-    let json = stdout_json(
+    let mut json = stdout_json(
         &against(
             &bulb,
             &addr,
@@ -243,23 +254,87 @@ async fn bench_ramps_rate_probes_latency_and_interpolation_and_restores_state() 
         )
         .await,
     );
-    assert_eq!(json["ok"], Value::Bool(true));
-    assert_eq!(json["command"], "bench");
-    assert_eq!(json["result"]["device"]["model"], "ESP25_SHRGB_01");
-    assert_eq!(json["result"]["restored"], Value::Bool(true));
-    let steps = json["result"]["rate_sweep"].as_array().expect("steps list");
-    assert_eq!(steps.len(), 2);
-    assert_eq!(steps[0]["rate_hz"], 10.0);
-    assert_eq!(steps[1]["rate_hz"], 20.0);
-    assert!(steps[0]["rtt_ms"]["median"].is_number(), "{steps:?}");
-    assert_eq!(
-        json["result"]["latency_probe"]["pattern"],
-        "black_to_white_step"
-    );
-    assert_eq!(
-        json["result"]["interpolation_probe"]["abrupt_step"]["pattern"],
-        "red_to_blue_step"
-    );
+    json["target"] = json!("<target>");
+    for step in json["result"]["rate_sweep"].as_array_mut().expect("steps") {
+        assert!(step["rtt_ms"]["median"].is_number(), "{step:?}");
+        step["rtt_ms"] = json!("<rtt>");
+    }
+    json["result"]["latency_probe"]["socket_rtt_ms"] = json!("<rtt>");
+    json["result"]["interpolation_probe"]["abrupt_step"]["socket_rtt_ms"] = json!("<rtt>");
+    json["result"]["interpolation_probe"]["rapid_alternation"]["socket_rtt_ms"] = json!("<rtt>");
+    assert_json_snapshot!(json, @r#"
+    {
+      "command": "bench",
+      "ok": true,
+      "result": {
+        "config": {
+          "hold_ms": 50,
+          "max_rate_hz": 20.0,
+          "method": "setPilot",
+          "min_rate_hz": 10.0,
+          "mode": "auto",
+          "steps": 2
+        },
+        "device": {
+          "class": "RGB",
+          "firmware": "1.38.0",
+          "mac": "9877d5230f0a",
+          "model": "ESP25_SHRGB_01",
+          "rssi": -52
+        },
+        "interpolation_probe": {
+          "abrupt_step": {
+            "inferred_drops": 0,
+            "pattern": "red_to_blue_step",
+            "responses": 1,
+            "sent": 1,
+            "socket_rtt_ms": "<rtt>"
+          },
+          "procedure": "At >=120 fps, <=1 intermediate frame on INTERPOLATION_STEP indicates a hardware snap; >=2 monotonic intermediate frames indicates an internal ramp of (frames / fps) seconds. A steady blend during INTERPOLATION_ALT indicates the ramp time constant exceeds 1 / (2 * rate_hz).",
+          "rapid_alternation": {
+            "inferred_drops": 0,
+            "loss_pct": 0.0,
+            "pattern": "red_blue_alternation",
+            "rate_hz": 20.0,
+            "responses": 4,
+            "sent": 4,
+            "socket_rtt_ms": "<rtt>"
+          }
+        },
+        "latency_probe": {
+          "inferred_drops": 0,
+          "pattern": "black_to_white_step",
+          "procedure": "Film the terminal stderr LATENCY_STEP marker and the bulb together at >=120 fps; packet-to-photon latency_ms = (first_lit_frame - marker_frame) * (1000 / fps).",
+          "responses": 1,
+          "sent": 1,
+          "socket_rtt_ms": "<rtt>",
+          "trials": 1
+        },
+        "rate_sweep": [
+          {
+            "inferred_drops": 0,
+            "interval_ms": 100.0,
+            "loss_pct": 0.0,
+            "rate_hz": 10.0,
+            "responses": 1,
+            "rtt_ms": "<rtt>",
+            "sent": 1
+          },
+          {
+            "inferred_drops": 0,
+            "interval_ms": 50.0,
+            "loss_pct": 0.0,
+            "rate_hz": 20.0,
+            "responses": 1,
+            "rtt_ms": "<rtt>",
+            "sent": 1
+          }
+        ],
+        "restored": true
+      },
+      "target": "<target>"
+    }
+    "#);
 
     // Pre-bench state was restored after both runs.
     let restored = bulb.pilot();
@@ -502,14 +577,13 @@ async fn discover_lists_what_answered() {
 
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
-    let line = stdout.trim();
 
     // MAC first: it is the column worth copying, being the only identity that
     // survives a DHCP lease.
-    assert!(line.starts_with("9877d5230f0a"), "{line}");
-    assert!(line.contains("127.0.0.1"), "{line}");
-    assert!(line.contains("ESP25_SHRGB_01"), "{line}");
-    assert!(line.contains("1.38.0"), "{line}");
+    assert_snapshot!(
+        stdout.trim(),
+        @"9877d5230f0a  127.0.0.1  ESP25_SHRGB_01  1.38.0"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -524,19 +598,27 @@ async fn discover_json_carries_the_envelope_and_one_object_per_bulb() {
             .expect("the scan ran");
 
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
-    let value: Value = serde_json::from_str(stdout.trim()).expect("stdout is JSON under --json");
+    let mut value: Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is JSON under --json");
+    assert_eq!(value["result"][0]["port"], port);
+    value["result"][0]["port"] = json!("<ephemeral>");
 
-    assert_eq!(value["ok"], Value::Bool(true));
-    assert_eq!(value["command"], "discover");
-    assert_eq!(value["target"], Value::Null);
-
-    let bulbs = value["result"].as_array().expect("result is a list");
-    assert_eq!(bulbs.len(), 1);
-    assert_eq!(bulbs[0]["mac"], "9877d5230f0a");
-    assert_eq!(bulbs[0]["ip"], "127.0.0.1");
-    assert_eq!(bulbs[0]["port"], port);
-    assert_eq!(bulbs[0]["model"], "ESP25_SHRGB_01");
-    assert_eq!(bulbs[0]["firmware"], "1.38.0");
+    assert_json_snapshot!(value, @r#"
+    {
+      "command": "discover",
+      "ok": true,
+      "result": [
+        {
+          "firmware": "1.38.0",
+          "ip": "127.0.0.1",
+          "mac": "9877d5230f0a",
+          "model": "ESP25_SHRGB_01",
+          "port": "<ephemeral>"
+        }
+      ],
+      "target": null
+    }
+    "#);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -550,11 +632,17 @@ async fn discover_finding_nothing_is_a_success_with_an_empty_list() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
     let value: Value = serde_json::from_str(stdout.trim()).expect("JSON");
-    assert_eq!(value["ok"], Value::Bool(true));
-    assert_eq!(value["result"], serde_json::json!([]));
+    assert_json_snapshot!(value, @r#"
+    {
+      "command": "discover",
+      "ok": true,
+      "result": [],
+      "target": null
+    }
+    "#);
 
     let human = String::from_utf8(scan(&["discover"]).stdout).expect("utf-8");
-    assert!(human.trim().starts_with("no bulbs answered"), "{human}");
+    assert_snapshot!(human.trim(), @"no bulbs answered in 0.1s");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -577,12 +665,24 @@ async fn discover_reports_a_bulb_that_will_not_describe_itself() {
             .expect("the scan ran");
 
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
-    let value: Value = serde_json::from_str(stdout.trim()).expect("JSON");
-    let bulbs = value["result"].as_array().expect("result is a list");
-    assert_eq!(bulbs.len(), 1, "{value}");
-    assert_eq!(bulbs[0]["mac"], "9877d523a4da");
-    assert_eq!(bulbs[0]["model"], Value::Null);
-    assert_eq!(bulbs[0]["firmware"], Value::Null);
+    let mut value: Value = serde_json::from_str(stdout.trim()).expect("JSON");
+    value["result"][0]["port"] = json!("<ephemeral>");
+    assert_json_snapshot!(value, @r#"
+    {
+      "command": "discover",
+      "ok": true,
+      "result": [
+        {
+          "firmware": null,
+          "ip": "127.0.0.1",
+          "mac": "9877d523a4da",
+          "model": null,
+          "port": "<ephemeral>"
+        }
+      ],
+      "target": null
+    }
+    "#);
 
     // The human column is a dash rather than the word "null".
     let addr = bulb.addr().to_string();
@@ -593,7 +693,7 @@ async fn discover_reports_a_bulb_that_will_not_describe_itself() {
             .stdout,
     )
     .expect("utf-8");
-    assert_eq!(human.trim(), "9877d523a4da  127.0.0.1  -  -");
+    assert_snapshot!(human.trim(), @"9877d523a4da  127.0.0.1  -  -");
 }
 
 /// Runs a command against a bulb, addressing it by whatever `target` says.
@@ -652,14 +752,27 @@ async fn status_reports_what_the_bulb_says_it_is_doing() {
     let human = against(&bulb, &addr, &["status"]).await;
     assert_eq!(human.status.code(), Some(0));
     let line = String::from_utf8(human.stdout).expect("utf-8");
-    assert_eq!(line.trim(), "on  rgb 255,80,0  40%  -52 dBm");
+    assert_snapshot!(line.trim(), @"on  rgb 255,80,0  40%  -52 dBm");
 
-    let json = stdout_json(&against(&bulb, &addr, &["--json", "status"]).await);
-    assert_eq!(json["ok"], Value::Bool(true));
-    assert_eq!(json["command"], "status");
-    assert_eq!(json["result"]["state"], Value::Bool(true));
-    assert_eq!(json["result"]["r"], 255);
-    assert_eq!(json["result"]["dimming"], 40);
+    let mut json = stdout_json(&against(&bulb, &addr, &["--json", "status"]).await);
+    assert_eq!(json["target"], addr);
+    json["target"] = json!("<target>");
+    assert_json_snapshot!(json, @r#"
+    {
+      "command": "status",
+      "ok": true,
+      "result": {
+        "b": 0,
+        "dimming": 40,
+        "g": 80,
+        "r": 255,
+        "rssi": -52,
+        "sceneId": 0,
+        "state": true
+      },
+      "target": "<target>"
+    }
+    "#);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -671,11 +784,24 @@ async fn status_names_a_running_scene() {
     let addr = bulb.addr().to_string();
 
     let human = String::from_utf8(against(&bulb, &addr, &["status"]).await.stdout).expect("utf-8");
-    assert!(human.contains("scene Party (4)"), "{human}");
+    assert_snapshot!(human.trim(), @"on  scene Party (4)  100%  speed 100");
 
-    let json = stdout_json(&against(&bulb, &addr, &["--json", "status"]).await);
-    assert_eq!(json["result"]["sceneId"], 4);
-    assert_eq!(json["result"]["scene"], "Party");
+    let mut json = stdout_json(&against(&bulb, &addr, &["--json", "status"]).await);
+    json["target"] = json!("<target>");
+    assert_json_snapshot!(json, @r#"
+    {
+      "command": "status",
+      "ok": true,
+      "result": {
+        "dimming": 100,
+        "scene": "Party",
+        "sceneId": 4,
+        "speed": 100,
+        "state": true
+      },
+      "target": "<target>"
+    }
+    "#);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -684,15 +810,50 @@ async fn info_describes_the_model_and_what_it_can_do() {
     let addr = bulb.addr().to_string();
 
     let human = String::from_utf8(against(&bulb, &addr, &["info"]).await.stdout).expect("utf-8");
-    assert!(human.contains("ESP25_SHRGB_01"), "{human}");
-    assert!(human.contains("1.38.0"), "{human}");
-    assert!(human.contains("2200-6500 K"), "{human}");
-    assert!(human.contains("colour"), "{human}");
+    assert_snapshot!(human.trim(), @r"
+    model        ESP25_SHRGB_01
+    firmware     1.38.0
+    class        RGB Tunable (RGB)
+    kelvin       2200-6500 K
+    can          colour, tunable white, scenes, dimming
+    scenes       39
+    derived from ModuleName
+    ");
 
-    let json = stdout_json(&against(&bulb, &addr, &["--json", "info"]).await);
-    assert_eq!(json["result"]["class"], "RGB");
-    assert_eq!(json["result"]["features"]["color"], Value::Bool(true));
-    assert_eq!(json["result"]["kelvin_range"]["min"], 2200);
+    let mut json = stdout_json(&against(&bulb, &addr, &["--json", "info"]).await);
+    json["target"] = json!("<target>");
+    assert_json_snapshot!(json, @r#"
+    {
+      "command": "info",
+      "ok": true,
+      "result": {
+        "class": "RGB",
+        "derivation": "module_name",
+        "description": "RGB Tunable",
+        "fan_speed_range": null,
+        "features": {
+          "brightness": true,
+          "color": true,
+          "color_tmp": true,
+          "dual_head": false,
+          "effect": true,
+          "fan": false,
+          "fan_breeze_mode": false,
+          "fan_reverse": false
+        },
+        "fw_version": "1.38.0",
+        "kelvin_range": {
+          "max": 6500,
+          "min": 2200
+        },
+        "module_name": "ESP25_SHRGB_01",
+        "scenes": 39,
+        "white_channels": 1,
+        "white_to_color_ratio": 80
+      },
+      "target": "<target>"
+    }
+    "#);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -705,21 +866,201 @@ async fn scenes_lists_only_what_that_class_plays() {
         .personality(Personality::tunable_white())
         .start()
         .await;
+    let dw = MockBulb::builder()
+        .personality(Personality::dimmable_white())
+        .start()
+        .await;
     let colour_addr = colour.addr().to_string();
     let white_addr = white.addr().to_string();
+    let dw_addr = dw.addr().to_string();
 
     let listed =
         String::from_utf8(against(&colour, &colour_addr, &["scenes"]).await.stdout).expect("utf-8");
-    assert!(listed.contains("Party"), "{listed}");
+    assert_snapshot!(listed.trim_end(), @r"
+      1  Ocean
+      2  Romance
+      3  Sunset
+      4  Party
+      5  Fireplace
+      6  Cozy
+      7  Forest
+      8  Pastel colors
+      9  Wake up
+     10  Bedtime
+     11  Warm white
+     12  Daylight
+     13  Cool white
+     14  Night light
+     15  Focus
+     16  Relax
+     17  True colors
+     18  TV time
+     19  Plant growth
+     20  Spring
+     21  Summer
+     22  Fall
+     23  Deep dive
+     24  Jungle
+     25  Mojito
+     26  Club
+     27  Christmas
+     28  Halloween
+     29  Candlelight
+     30  Golden white
+     31  Pulse
+     32  Steampunk
+     33  Diwali
+     34  White
+     35  Alarm
+     36  Snowy sky
+     38  Soft white
+     39  Crisp white
+     40  Dim-to-warm
+    ");
 
     let listed =
         String::from_utf8(against(&white, &white_addr, &["scenes"]).await.stdout).expect("utf-8");
-    assert!(!listed.contains("Party"), "{listed}");
-    assert!(listed.contains("Cozy"), "{listed}");
+    assert_snapshot!(listed.trim_end(), @r"
+      6  Cozy
+      9  Wake up
+     10  Bedtime
+     11  Warm white
+     12  Daylight
+     13  Cool white
+     14  Night light
+     15  Focus
+     16  Relax
+     18  TV time
+     29  Candlelight
+     30  Golden white
+     31  Pulse
+     32  Steampunk
+     33  Diwali
+     35  Alarm
+     40  Dim-to-warm
+    ");
 
-    let json = stdout_json(&against(&white, &white_addr, &["--json", "scenes"]).await);
-    let scenes = json["result"].as_array().expect("a list");
-    assert!(scenes.iter().all(|scene| scene["name"] != "Party"));
+    let mut json = stdout_json(&against(&dw, &dw_addr, &["--json", "scenes"]).await);
+    json["target"] = json!("<target>");
+    assert_json_snapshot!(json, @r#"
+    {
+      "command": "scenes",
+      "ok": true,
+      "result": [
+        {
+          "adjustable": {
+            "dimming": false,
+            "speed": false
+          },
+          "animates": true,
+          "category": "progressive",
+          "id": 9,
+          "name": "Wake up"
+        },
+        {
+          "adjustable": {
+            "dimming": true,
+            "speed": false
+          },
+          "animates": true,
+          "category": "progressive",
+          "id": 10,
+          "name": "Bedtime"
+        },
+        {
+          "adjustable": {
+            "dimming": true,
+            "speed": false
+          },
+          "animates": false,
+          "category": "white",
+          "id": 13,
+          "name": "Cool white"
+        },
+        {
+          "adjustable": {
+            "dimming": false,
+            "speed": false
+          },
+          "animates": false,
+          "category": "functional",
+          "id": 14,
+          "name": "Night light"
+        },
+        {
+          "adjustable": {
+            "dimming": true,
+            "speed": false
+          },
+          "animates": true,
+          "category": "dynamic",
+          "id": 29,
+          "name": "Candlelight"
+        },
+        {
+          "adjustable": {
+            "dimming": true,
+            "speed": true
+          },
+          "animates": true,
+          "category": "dynamic",
+          "id": 30,
+          "name": "Golden white"
+        },
+        {
+          "adjustable": {
+            "dimming": true,
+            "speed": true
+          },
+          "animates": true,
+          "category": "dynamic",
+          "id": 31,
+          "name": "Pulse"
+        },
+        {
+          "adjustable": {
+            "dimming": true,
+            "speed": true
+          },
+          "animates": true,
+          "category": "dynamic",
+          "id": 32,
+          "name": "Steampunk"
+        },
+        {
+          "adjustable": {
+            "dimming": true,
+            "speed": true
+          },
+          "animates": true,
+          "category": "dynamic",
+          "id": 33,
+          "name": "Diwali"
+        },
+        {
+          "adjustable": {
+            "dimming": true,
+            "speed": false
+          },
+          "animates": false,
+          "category": "white",
+          "id": 34,
+          "name": "White"
+        },
+        {
+          "adjustable": {
+            "dimming": false,
+            "speed": false
+          },
+          "animates": true,
+          "category": "dynamic",
+          "id": 35,
+          "name": "Alarm"
+        }
+      ],
+      "target": "<target>"
+    }
+    "#);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -930,11 +1271,26 @@ async fn off_and_toggle_write_the_power_state() {
         .await;
     let addr = bulb.addr().to_string();
 
-    against(&bulb, &addr, &["off"]).await;
+    let off = against(&bulb, &addr, &["off"]).await;
+    assert_eq!(off.status.code(), Some(0));
+    assert_snapshot!(String::from_utf8(off.stdout).unwrap().trim(), @"off");
     assert_eq!(
         bulb.last_request().expect("a write")["params"]["state"],
         Value::Bool(false)
     );
+
+    let mut off_json = stdout_json(&against(&bulb, &addr, &["--json", "off"]).await);
+    off_json["target"] = json!("<target>");
+    assert_json_snapshot!(off_json, @r#"
+    {
+      "command": "off",
+      "ok": true,
+      "result": {
+        "state": false
+      },
+      "target": "<target>"
+    }
+    "#);
 
     // The bulb is now off, so a toggle turns it back on.
     let output = against(&bulb, &addr, &["toggle"]).await;
@@ -943,10 +1299,165 @@ async fn off_and_toggle_write_the_power_state() {
         bulb.last_request().expect("a write")["params"]["state"],
         Value::Bool(true)
     );
-    assert_eq!(
+    assert_snapshot!(
         String::from_utf8(output.stdout).expect("utf-8").trim(),
-        "on"
+        @"on"
     );
+
+    let mut toggle_json = stdout_json(&against(&bulb, &addr, &["--json", "toggle"]).await);
+    toggle_json["target"] = json!("<target>");
+    assert_json_snapshot!(toggle_json, @r#"
+    {
+      "command": "toggle",
+      "ok": true,
+      "result": {
+        "state": false
+      },
+      "target": "<target>"
+    }
+    "#);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn write_commands_render_human_and_json_snapshots() {
+    let bulb = MockBulb::start().await;
+    let addr = bulb.addr().to_string();
+
+    let on_rgbww = against(
+        &bulb,
+        &addr,
+        &[
+            "on", "--rgb", "255,80,0", "--cold", "0", "--warm", "64", "-b", "40",
+        ],
+    )
+    .await;
+    assert_snapshot!(
+        String::from_utf8(on_rgbww.stdout).unwrap().trim(),
+        @"on  rgb 255,80,0  cold 0  warm 64  40%"
+    );
+
+    let mut on_rgbww_json = stdout_json(
+        &against(
+            &bulb,
+            &addr,
+            &[
+                "--json", "on", "--rgb", "255,80,0", "--cold", "0", "--warm", "64", "-b", "40",
+            ],
+        )
+        .await,
+    );
+    on_rgbww_json["target"] = json!("<target>");
+    assert_json_snapshot!(on_rgbww_json, @r#"
+    {
+      "command": "on",
+      "ok": true,
+      "result": {
+        "c": 0,
+        "dimming": 40,
+        "rgb": [
+          255,
+          80,
+          0
+        ],
+        "state": true,
+        "w": 64
+      },
+      "target": "<target>"
+    }
+    "#);
+
+    let on_scene = against(
+        &bulb,
+        &addr,
+        &["on", "--scene", "Deep dive", "--speed", "150", "-b", "80"],
+    )
+    .await;
+    assert_snapshot!(
+        String::from_utf8(on_scene.stdout).unwrap().trim(),
+        @"on  scene Deep dive (23)  speed 150  80%"
+    );
+
+    let mut on_scene_json = stdout_json(
+        &against(
+            &bulb,
+            &addr,
+            &[
+                "--json",
+                "on",
+                "--scene",
+                "Deep dive",
+                "--speed",
+                "150",
+                "-b",
+                "80",
+            ],
+        )
+        .await,
+    );
+    on_scene_json["target"] = json!("<target>");
+    assert_json_snapshot!(on_scene_json, @r#"
+    {
+      "command": "on",
+      "ok": true,
+      "result": {
+        "dimming": 80,
+        "scene": "Deep dive",
+        "sceneId": 23,
+        "speed": 150,
+        "state": true
+      },
+      "target": "<target>"
+    }
+    "#);
+
+    let set_kelvin = against(&bulb, &addr, &["set", "--kelvin", "2700", "-b", "60"]).await;
+    assert_snapshot!(
+        String::from_utf8(set_kelvin.stdout).unwrap().trim(),
+        @"on  2700 K  60%"
+    );
+
+    let mut set_kelvin_json = stdout_json(
+        &against(
+            &bulb,
+            &addr,
+            &["--json", "set", "--kelvin", "2700", "-b", "60"],
+        )
+        .await,
+    );
+    set_kelvin_json["target"] = json!("<target>");
+    assert_json_snapshot!(set_kelvin_json, @r#"
+    {
+      "command": "set",
+      "ok": true,
+      "result": {
+        "dimming": 60,
+        "state": true,
+        "temp": 2700
+      },
+      "target": "<target>"
+    }
+    "#);
+
+    let mut pulse_json = stdout_json(
+        &against(
+            &bulb,
+            &addr,
+            &["--json", "pulse", "--delta", "-80", "--duration", "150"],
+        )
+        .await,
+    );
+    pulse_json["target"] = json!("<target>");
+    assert_json_snapshot!(pulse_json, @r#"
+    {
+      "command": "pulse",
+      "ok": true,
+      "result": {
+        "delta": -80,
+        "duration": 150
+      },
+      "target": "<target>"
+    }
+    "#);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1098,26 +1609,32 @@ async fn all_fans_out_and_one_failure_does_not_hide_the_others() {
     let output = output.await.expect("the command ran");
 
     assert_eq!(output.status.code(), Some(1), "a partial failure is not 0");
-    let json = stdout_json(&output);
-    assert_eq!(json["ok"], Value::Bool(false));
-    assert_eq!(json["target"], Value::Null);
-
-    let results = json["result"].as_array().expect("one entry per bulb");
-    assert_eq!(results.len(), 2);
-    // Sorted by MAC, so a fan-out can be diffed between runs.
-    assert_eq!(results[0]["target"], "9877d5230f0a");
-    assert_eq!(results[0]["ok"], Value::Bool(true));
-    assert_eq!(results[0]["result"]["state"], Value::Bool(true));
-    assert_eq!(results[1]["target"], "9877d523a4da");
-    assert_eq!(results[1]["ok"], Value::Bool(false));
-    assert!(
-        results[1]["error"]
-            .as_str()
-            .expect("a message")
-            .contains("no reply"),
-        "{}",
-        results[1]["error"]
-    );
+    let mut json = stdout_json(&output);
+    let err = json["result"][1]["error"].as_str().expect("a message");
+    assert!(err.contains("no reply"), "{err}");
+    json["result"][1]["error"] = json!("<timeout>");
+    assert_json_snapshot!(json, @r#"
+    {
+      "command": "status",
+      "ok": false,
+      "result": [
+        {
+          "ok": true,
+          "result": {
+            "dimming": 100,
+            "state": true
+          },
+          "target": "9877d5230f0a"
+        },
+        {
+          "error": "<timeout>",
+          "ok": false,
+          "target": "9877d523a4da"
+        }
+      ],
+      "target": null
+    }
+    "#);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1134,17 +1651,20 @@ async fn a_fan_out_labels_every_line_with_the_bulb_it_came_from() {
         .await;
     let addrs = [one.addr().to_string(), two.addr().to_string()];
 
-    let output = tokio::task::spawn_blocking(move || {
-        wizlight(&[
-            "--broadcast",
-            &addrs[0],
-            "--broadcast",
-            &addrs[1],
-            "--wait",
-            SCAN,
-            "status",
-            "--all",
-        ])
+    let output = tokio::task::spawn_blocking({
+        let addrs = addrs.clone();
+        move || {
+            wizlight(&[
+                "--broadcast",
+                &addrs[0],
+                "--broadcast",
+                &addrs[1],
+                "--wait",
+                SCAN,
+                "status",
+                "--all",
+            ])
+        }
     })
     .await
     .expect("the command ran");
@@ -1152,9 +1672,51 @@ async fn a_fan_out_labels_every_line_with_the_bulb_it_came_from() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
     // One line per bulb, MAC first, so the output stays greppable.
-    assert_eq!(
+    assert_snapshot!(
         stdout.trim(),
-        "9877d5230f0a  on  100%\n9877d523a4da  off  40%"
+        @r"
+    9877d5230f0a  on  100%
+    9877d523a4da  off  40%
+    "
+    );
+
+    // Multi-line reports (`info --all`) use a MAC heading and a two-space indent.
+    let multi = tokio::task::spawn_blocking(move || {
+        wizlight(&[
+            "--broadcast",
+            &addrs[0],
+            "--broadcast",
+            &addrs[1],
+            "--wait",
+            SCAN,
+            "info",
+            "--all",
+        ])
+    })
+    .await
+    .expect("the command ran");
+    assert_eq!(multi.status.code(), Some(0));
+    let stdout = String::from_utf8(multi.stdout).expect("utf-8");
+    assert_snapshot!(
+        stdout.trim(),
+        @r"
+    9877d5230f0a:
+      model        ESP25_SHRGB_01
+      firmware     1.38.0
+      class        RGB Tunable (RGB)
+      kelvin       2200-6500 K
+      can          colour, tunable white, scenes, dimming
+      scenes       39
+      derived from ModuleName
+    9877d523a4da:
+      model        ESP25_SHRGB_01
+      firmware     1.38.0
+      class        RGB Tunable (RGB)
+      kelvin       2200-6500 K
+      can          colour, tunable white, scenes, dimming
+      scenes       39
+      derived from ModuleName
+    "
     );
 }
 
