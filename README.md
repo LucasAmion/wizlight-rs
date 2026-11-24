@@ -233,10 +233,19 @@ soon as that bulb answers.
 finds, concurrently. One bulb failing does not abort the rest, and does not let
 the run exit `0` either.
 
-It always costs the full scan, though — around five seconds — because there is
-no way to know that the last bulb has answered. When you know how many to
-expect, `--wait 1` is plenty on a quiet network: both bulbs here answer a
-broadcast in about 100 ms.
+By default, `discover` and `--all` wait the full scan window — around five
+seconds — and return results sorted by MAC so buffered output stays diffable.
+Two global flags cut that latency:
+
+- **`--expect N`** stops the scan as soon as `N` distinct bulbs have answered
+  (falling back to `--wait` if fewer respond), keeping the exact same buffered
+  output shape. On a quiet network with two bulbs, `--expect 2` turns a 5 s
+  command into ~150 ms.
+- **`--stream`** reports and acts on each bulb as it answers in arrival order
+  instead of waiting for the scan to finish — dropping time-to-first-photon on
+  `--all` commands to ~100 ms. In human `discover` output, MAC and IP use fixed
+  column widths while model and firmware stay ragged; under `--json`, `--stream`
+  emits newline-delimited JSON (one envelope per bulb).
 
 The ways of naming a colour are mutually exclusive, and clap rejects two of them
 before anything is sent. `--cold` and `--warm` are the exception, and compose
@@ -265,10 +274,10 @@ nothing. Use `off` to go dark and `--brightness` to go dim.
   {"ok": false, "command": "status", "target": "9877d5230f0a", "error": "no reply from …"}
   ```
 
-  `result` is shaped by the command; under `--all` it is a list of
+  `result` is shaped by the command; under buffered `--all` it is a list of
   `{"target", "ok", "result"}` or `{"target", "ok", "error"}`, one per bulb.
-  `watch --json` is the streaming exception: it writes one envelope per update
-  as newline-delimited JSON, and includes the bulb MAC in each `--all` result.
+  `watch --json` and `--stream --json` emit one envelope per update or bulb as
+  newline-delimited JSON.
 - **Exit codes**: `0` success, `1` failed, `2` usage, `3` nothing answered to
   that target, `4` a bulb was there and stopped answering. The last two are
   separate because they call for different reactions — re-scan, or retry.
