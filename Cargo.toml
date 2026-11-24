@@ -1,7 +1,6 @@
 [package]
 name = "wizlight"
-# Release candidate for 0.1.0, exercising all install paths before the final tag.
-version = "0.1.0-rc.1"
+version = "0.1.0"
 edition = "2024"
 # Floor is set by clap 4.6 and by edition 2024; both need 1.85.
 rust-version = "1.85"

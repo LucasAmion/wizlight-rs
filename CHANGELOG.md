@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-11-24
+
+First stable release of `wizlight` — both the async Rust library (`default-features = false`)
+and the `wizlight` CLI binary.
+
+All four distribution channels (`cargo install wizlight`, shell/PowerShell
+installers, Homebrew via `LucasAmion/tap/wizlight`, and raw prebuilt archives
+including statically linked Linux musl binaries on Alpine and AlmaLinux 9) were
+verified on clean environments against `0.1.0-rc.1`.
+
+### Highlights
+
+- **Reliable UDP transport & discovery**: `Bulb` request/response handle with
+  measured pacing and retry policy, plus streaming MAC-deduplicated UDP
+  broadcast `Discovery`.
+- **Typed protocol surface**: validated write newtypes (`Channel`, `Dimming`,
+  `Kelvin`, `Speed`, `Ratio`, `Devices`, `SceneId`, `PulseDelta`), mutual
+  exclusion in `PilotBuilder`, `Bulb::pulse`, config queries (`SystemConfig`,
+  `ModelConfig`, `UserConfig`, `Power`), `BulbType` / `Features` / `KelvinRange`
+  model parsing, and the 39-scene hardware-measured `Scene` table plus user
+  slots `256..=265`.
+- **Real-time streaming & push updates**: capacity-one newest-frame-coalescing
+  `Bulb::stream()` defaulting to the measured 5 Hz (200 ms) zero-skip optical
+  ceiling, and a shared `:38900` `PushManager` with per-MAC `syncPilot` /
+  `firstBeat` subscriptions, 20 s keepalive renewal and post-discovery refresh.
+- **Full `wizlight` CLI** (`cli` feature, default on): `discover`, `status`,
+  `info`, `scenes`, `on`, `off`, `toggle`, `set`, `pulse`, `watch`, `bench`,
+  and `completions`, with IP or MAC targeting, `--all` fan-out, `--json`
+  output on every command, and automatic multi-subnet broadcast detection.
+- **Documentation & protocol reference**: `#![deny(missing_docs)]`, 33
+  doc-tests, runnable examples, and `docs/WIZ_PROTOCOL.md` distinguishing
+  measured hardware behaviour from inherited ranges.
+
+### Changed since `0.1.0-rc.1`
+
+- Switched `README.md` library and install examples to stable `0.1` /
+  `releases/latest/download/...` / plain `cargo install wizlight`.
+- Set `publish-prereleases = false` in `dist-workspace.toml` so future
+  prereleases do not move the Homebrew formula off stable releases.
+
 ## [0.1.0-rc.1] — 2026-11-24
 
 Release candidate for `0.1.0`, cut to verify every distribution path —
@@ -449,7 +489,8 @@ is only reachable by asking for `0.1.0-alpha.1` exactly.
   error explaining that.
 
 [light-modes]: https://docs.pro.wizconnected.com/#light-modes
-[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-rc.1...HEAD
+[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0
 [0.1.0-rc.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-rc.1
 [0.1.0-beta.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-beta.1
 [0.1.0-alpha.4]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.4

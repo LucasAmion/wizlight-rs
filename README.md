@@ -13,14 +13,6 @@ It is a port of the parts of [`pywizlight`][pywizlight] that matter for
 real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
-> **Status: release candidate (`0.1.0-rc.1`).** The public API is frozen and
-> ready for `0.1.0` once clean-machine install verification across crates.io,
-> Homebrew, shell installers and prebuilt archives completes.
->
-> Cargo does not match a prerelease against an ordinary requirement: `wizlight = "0.1"`
-> resolves to nothing, and plain `cargo install wizlight` fails, until `0.1.0`
-> is out — spell `0.1.0-rc.1` out in full until then.
-
 ## Capabilities
 
 - **Discovery by UDP broadcast** — streamed as bulbs answer, deduplicated by
@@ -55,11 +47,8 @@ unknowns are collected in [`docs/WIZ_PROTOCOL.md`](docs/WIZ_PROTOCOL.md).
 
 ```toml
 [dependencies]
-wizlight = { version = "0.1.0-rc.1", default-features = false }
+wizlight = { version = "0.1", default-features = false }
 ```
-
-The prerelease has to be spelled out in full: a plain `"0.1"` requirement does
-not match `0.1.0-rc.1`, and will keep doing nothing until `0.1.0` ships.
 
 **`default-features = false` matters.** The `cli` feature is on by default so
 that `cargo install wizlight` produces a working binary, and it pulls in `clap`,
@@ -318,20 +307,17 @@ the built-in help remains available through every installation route.
 
 ### Installing
 
-From `0.1.0-alpha.3` onward each release carries prebuilt binaries, so a Rust
-toolchain is not a prerequisite. Substitute the newest tag from the
-[releases page](https://github.com/LucasAmion/wizlight-rs/releases) — the usual
-`releases/latest/download/…` URL cannot be used yet, because GitHub does not
-count a prerelease as the latest release.
+Each release carries prebuilt binaries, so a Rust toolchain is not a
+prerequisite:
 
 ```console
-$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-rc.1/wizlight-installer.sh | sh
+$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/LucasAmion/wizlight-rs/releases/latest/download/wizlight-installer.sh | sh
 ```
 
 On Windows, in PowerShell:
 
 ```console
-> irm https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-rc.1/wizlight-installer.ps1 | iex
+> irm https://github.com/LucasAmion/wizlight-rs/releases/latest/download/wizlight-installer.ps1 | iex
 ```
 
 Or with Homebrew, on macOS and Linux:
@@ -344,28 +330,20 @@ Or, if you already have [`cargo-binstall`](https://github.com/cargo-bins/cargo-b
 which fetches the same prebuilt archives instead of compiling:
 
 ```console
-$ cargo binstall wizlight --version 0.1.0-rc.1
+$ cargo binstall wizlight
 ```
 
 Binaries are built for macOS (Apple Silicon and Intel), Linux (x86-64 and
 arm64) and Windows (x86-64). The Linux builds are statically linked against
-musl, so they carry no glibc requirement and run on Alpine as happily as on
-Debian. On a glibc system `binstall` looks for a gnu build first and falls back
-to the musl one, so it finds these.
+musl, so they carry no glibc requirement and run on Alpine and RHEL 9
+derivatives as happily as on Debian. On a glibc system `binstall` looks for a
+gnu build first and falls back to the musl one, so it finds these.
 
-From source, with a Rust toolchain, the version has to be spelled out.
-`cargo install` resolves `*`, and `*` does not match a prerelease, so the bare
-form fails outright rather than finding the prerelease — the same applies to
-`cargo binstall` above, which resolves the version the same way:
+Or build from source with a Rust toolchain (MSRV 1.85):
 
 ```console
 $ cargo install wizlight
-error: could not find `wizlight` in registry `crates-io` with version `*`
-
-$ cargo install wizlight --version 0.1.0-rc.1
 ```
-
-Plain `cargo install wizlight` starts working when `0.1.0` ships.
 
 #### macOS: "cannot be verified"
 

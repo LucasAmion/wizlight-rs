@@ -50,13 +50,13 @@ publish-jobs = ["homebrew", "./publish-crates"]
 # caller granted, and GitHub kills the entire release run at startup rather than
 # failing that one job. `packages` is dropped because nothing here uses it.
 github-custom-job-permissions = { "publish-crates" = { id-token = "write", contents = "read" } }
-# Publish prereleases too.
+# Do not publish prereleases to package managers (Homebrew tap or crates.io).
 #
-# Every release so far is an alpha whose whole purpose is to exercise the release
-# path. Left at the default, the Homebrew job would skip on every one of them and
-# the tap would stay unproven until 0.1.0. Revisit once 0.1.0 is out: after that,
-# a prerelease moving the formula is probably not wanted.
-publish-prereleases = true
+# This was `true` through the 0.1.0 alphas, beta and RC so the tap and crates.io
+# publish path stayed exercised before 0.1.0 shipped. Now that a stable release
+# is out, future prereleases stay on GitHub Releases without moving the Homebrew
+# formula or publishing prerelease crate versions automatically.
+publish-prereleases = false
 # Whether to install an updater program
 install-updater = false
 
