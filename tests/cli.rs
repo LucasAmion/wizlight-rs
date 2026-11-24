@@ -2,8 +2,10 @@
 
 mod common;
 
-use std::process::{Command as Proc, Output};
-use std::time::Duration;
+use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader};
+use std::process::{Command as Proc, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use clap::{CommandFactory, Parser};
 use common::mock_bulb::{MockBulb, Personality};
@@ -1935,4 +1937,452 @@ fn no_color_suppresses_colour() {
     let output = scan_with_env(&["-vv", "discover"], "NO_COLOR", "1");
     let stderr = String::from_utf8(output.stderr).expect("utf-8");
     assert!(!stderr.contains('\x1b'), "{stderr:?}");
+}
+
+#[test]
+fn stream_and_expect_flags_parse_globally_and_reject_zero() {
+    let cli =
+        Cli::try_parse_from(["wizlight", "--stream", "--expect", "2", "discover"]).expect("parses");
+    assert!(cli.stream);
+    assert_eq!(cli.expect, Some(2));
+
+    let after = Cli::try_parse_from(["wizlight", "on", "--all", "--stream", "--expect", "3"])
+        .expect("global flags work after subcommand");
+    assert!(after.stream);
+    assert_eq!(after.expect, Some(3));
+
+    assert!(Cli::try_parse_from(["wizlight", "--expect", "0", "discover"]).is_err());
+    assert!(Cli::try_parse_from(["wizlight", "--expect", "-1", "discover"]).is_err());
+    assert!(Cli::try_parse_from(["wizlight", "--expect", "two", "discover"]).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expect_stops_discover_and_fan_out_early_without_changing_output_shape() {
+    let one = MockBulb::builder().mac("9877d523a4da").start().await;
+    let two = MockBulb::builder().mac("9877d5230f0a").start().await;
+    let addrs = [one.addr().to_string(), two.addr().to_string()];
+
+    // A 4-second scan window that stops as soon as both expected bulbs answer.
+    let started = Instant::now();
+    let discover_out = tokio::task::spawn_blocking({
+        let addrs = addrs.clone();
+        move || {
+            wizlight(&[
+                "--json",
+                "--broadcast",
+                &addrs[0],
+                "--broadcast",
+                &addrs[1],
+                "--wait",
+                "4",
+                "--expect",
+                "2",
+                "discover",
+            ])
+        }
+    })
+    .await
+    .expect("discover ran");
+    let discover_elapsed = started.elapsed();
+
+    assert_eq!(discover_out.status.code(), Some(0));
+    assert!(
+        discover_elapsed < Duration::from_secs(2),
+        "expected early stop well before 4s wait, took {discover_elapsed:?}"
+    );
+    let json = stdout_json(&discover_out);
+    let macs: Vec<&str> = json["result"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|entry| entry["mac"].as_str().expect("mac"))
+        .collect();
+    // Buffered discover stays sorted by MAC.
+    assert_eq!(macs, vec!["9877d5230f0a", "9877d523a4da"]);
+
+    // Fan-out with --expect 2 also returns promptly with the buffered shape.
+    let started = Instant::now();
+    let fan_out = tokio::task::spawn_blocking(move || {
+        wizlight(&[
+            "--json",
+            "--broadcast",
+            &addrs[0],
+            "--broadcast",
+            &addrs[1],
+            "--wait",
+            "4",
+            "--expect",
+            "2",
+            "on",
+            "--all",
+            "--rgb",
+            "255,80,0",
+        ])
+    })
+    .await
+    .expect("fan-out ran");
+    let fan_elapsed = started.elapsed();
+
+    assert_eq!(fan_out.status.code(), Some(0));
+    assert!(
+        fan_elapsed < Duration::from_secs(2),
+        "expected early fan-out stop well before 4s wait, took {fan_elapsed:?}"
+    );
+    let json = stdout_json(&fan_out);
+    let targets: Vec<&str> = json["result"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|entry| entry["target"].as_str().expect("target"))
+        .collect();
+    assert_eq!(targets, vec!["9877d5230f0a", "9877d523a4da"]);
+    assert_eq!(one.pilot()["r"], 255);
+    assert_eq!(two.pilot()["r"], 255);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expect_falls_back_to_full_wait_when_fewer_bulbs_answer() {
+    let bulb = MockBulb::builder().mac("9877d5230f0a").start().await;
+    let addr = bulb.addr().to_string();
+
+    let output = tokio::task::spawn_blocking(move || {
+        wizlight(&[
+            "--json",
+            "--broadcast",
+            &addr,
+            "--wait",
+            SCAN,
+            "--expect",
+            "3",
+            "discover",
+        ])
+    })
+    .await
+    .expect("discover ran");
+
+    assert_eq!(output.status.code(), Some(0));
+    let json = stdout_json(&output);
+    let items = json["result"].as_array().expect("array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["mac"], "9877d5230f0a");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn discover_stream_prints_fixed_width_rows_as_bulbs_answer() {
+    let bulb = MockBulb::builder().mac("9877d5230f0a").start().await;
+    let addr = bulb.addr().to_string();
+
+    let (first_line, first_elapsed, status) = tokio::task::spawn_blocking(move || {
+        let started = Instant::now();
+        let mut child = Proc::new(env!("CARGO_BIN_EXE_wizlight"))
+            .args([
+                "--broadcast",
+                &addr,
+                "--wait",
+                "2.5",
+                "--stream",
+                "discover",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawned wizlight");
+
+        let mut reader = BufReader::new(child.stdout.take().expect("piped stdout"));
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read first line");
+        let elapsed = started.elapsed();
+        let status = child.wait().expect("child exited");
+        (line, elapsed, status)
+    })
+    .await
+    .expect("streamed discover ran");
+
+    assert_eq!(status.code(), Some(0));
+    assert!(
+        first_elapsed < Duration::from_millis(1500),
+        "first row should arrive before the 2.5s scan ends, took {first_elapsed:?}"
+    );
+    // Fixed-width MAC (12) and IPv4 (15), ragged model and firmware.
+    assert_snapshot!(
+        first_line.trim_end_matches(['\r', '\n']),
+        @"9877d5230f0a  127.0.0.1        ESP25_SHRGB_01  1.38.0"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn discover_stream_empty_scan_succeeds_in_both_formats() {
+    let human = tokio::task::spawn_blocking(|| scan(&["--stream", "discover"]))
+        .await
+        .expect("ran");
+    assert_eq!(human.status.code(), Some(0));
+    assert_snapshot!(
+        String::from_utf8(human.stdout).expect("utf-8").trim(),
+        @"no bulbs answered in 0.1s"
+    );
+
+    let json_out = tokio::task::spawn_blocking(|| scan(&["--stream", "--json", "discover"]))
+        .await
+        .expect("ran");
+    assert_eq!(json_out.status.code(), Some(0));
+    assert!(
+        json_out.stdout.is_empty(),
+        "empty NDJSON stream writes no lines"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn discover_ordering_is_arrival_under_stream_and_mac_sorted_when_buffered() {
+    // `late` sorts first by MAC but answers after a delay; `fast` sorts second
+    // by MAC and answers immediately.
+    let late = MockBulb::builder().mac("9877d5230001").start().await;
+    late.set_latency(Some(Duration::from_millis(250)));
+    let fast = MockBulb::builder().mac("9877d523ffff").start().await;
+    let addrs = [late.addr().to_string(), fast.addr().to_string()];
+
+    // Buffered mode sorts by MAC regardless of arrival order.
+    let buffered = tokio::task::spawn_blocking({
+        let addrs = addrs.clone();
+        move || {
+            wizlight(&[
+                "--json",
+                "--broadcast",
+                &addrs[0],
+                "--broadcast",
+                &addrs[1],
+                "--wait",
+                "1.0",
+                "--expect",
+                "2",
+                "discover",
+            ])
+        }
+    })
+    .await
+    .expect("buffered ran");
+    assert_eq!(buffered.status.code(), Some(0));
+    let buffered_macs: Vec<String> = stdout_json(&buffered)["result"]
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|item| item["mac"].as_str().expect("mac").to_owned())
+        .collect();
+    assert_eq!(buffered_macs, vec!["9877d5230001", "9877d523ffff"]);
+
+    // Streaming mode emits NDJSON in arrival order (`fast` first, `late` second).
+    let streamed = tokio::task::spawn_blocking(move || {
+        wizlight(&[
+            "--json",
+            "--stream",
+            "--broadcast",
+            &addrs[0],
+            "--broadcast",
+            &addrs[1],
+            "--wait",
+            "1.0",
+            "--expect",
+            "2",
+            "discover",
+        ])
+    })
+    .await
+    .expect("streamed ran");
+    assert_eq!(streamed.status.code(), Some(0));
+    let stdout = String::from_utf8(streamed.stdout).expect("utf-8");
+    let lines: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("NDJSON object"))
+        .collect();
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        assert_eq!(line["ok"], true);
+        assert_eq!(line["command"], "discover");
+        assert!(line["target"].is_null());
+    }
+    let streamed_macs: Vec<&str> = lines
+        .iter()
+        .map(|line| line["result"]["mac"].as_str().expect("mac"))
+        .collect();
+    assert_eq!(streamed_macs, vec!["9877d523ffff", "9877d5230001"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fan_out_stream_acts_immediately_and_emits_ndjson_with_partial_failures() {
+    let bulb = MockBulb::builder()
+        .mac("9877d5230f0a")
+        .pilot(json!({"state": false, "dimming": 100}))
+        .start()
+        .await;
+    let addr = bulb.addr().to_string();
+
+    // Start a 2.5-second streaming fan-out and assert the bulb receives
+    // `setPilot` long before the scan window ends.
+    let started = Instant::now();
+    let child_handle = tokio::task::spawn_blocking(move || {
+        wizlight(&[
+            "--broadcast",
+            &addr,
+            "--wait",
+            "2.5",
+            "--stream",
+            "on",
+            "--all",
+            "--rgb",
+            "255,80,0",
+        ])
+    });
+
+    let mut acted_at = None;
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < deadline {
+        if bulb
+            .requests()
+            .iter()
+            .any(|req| req.contains("\"setPilot\""))
+        {
+            acted_at = Some(started.elapsed());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let acted_at = acted_at.expect("setPilot should arrive well before the 2.5s scan ends");
+    assert!(
+        acted_at < Duration::from_millis(1500),
+        "expected immediate action, took {acted_at:?}"
+    );
+    let output = child_handle.await.expect("fan-out exited");
+    assert_eq!(output.status.code(), Some(0));
+
+    // Partial failure under `--stream --json`: `slow` answers discovery within
+    // the 0.4s scan window (at 200ms) and then exceeds the 50ms request
+    // timeout deterministically, so no polling race is possible even though
+    // `--stream` dispatches immediately on arrival.
+    let working = MockBulb::builder()
+        .mac("9877d5230f0a")
+        .pilot(json!({"state": true, "dimming": 100}))
+        .start()
+        .await;
+    let slow = MockBulb::builder().mac("9877d523a4da").start().await;
+    slow.set_latency(Some(Duration::from_millis(200)));
+    let addrs = [working.addr().to_string(), slow.addr().to_string()];
+
+    let output = tokio::task::spawn_blocking(move || {
+        wizlight(&[
+            "--json",
+            "--stream",
+            "--broadcast",
+            &addrs[0],
+            "--broadcast",
+            &addrs[1],
+            "--wait",
+            SCAN,
+            "--timeout",
+            "0.05",
+            "status",
+            "--all",
+        ])
+    })
+    .await
+    .expect("streamed status ran");
+
+    assert_eq!(output.status.code(), Some(1), "partial failure exits 1");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    let by_target: BTreeMap<String, Value> = stdout
+        .lines()
+        .map(|line| {
+            let value: Value = serde_json::from_str(line).expect("NDJSON line");
+            let target = value["target"].as_str().expect("target").to_owned();
+            (target, value)
+        })
+        .collect();
+    assert_eq!(by_target.len(), 2);
+    assert_eq!(by_target["9877d5230f0a"]["ok"], true);
+    assert_eq!(by_target["9877d5230f0a"]["command"], "status");
+    assert_eq!(by_target["9877d5230f0a"]["result"]["state"], true);
+    assert_eq!(by_target["9877d523a4da"]["ok"], false);
+    assert_eq!(by_target["9877d523a4da"]["command"], "status");
+    assert!(
+        by_target["9877d523a4da"]["error"]
+            .as_str()
+            .expect("error")
+            .contains("no reply")
+    );
+
+    // Zero bulbs under `--stream --all` still exits 3 (not found).
+    let none = tokio::task::spawn_blocking(|| scan(&["--stream", "status", "--all"]))
+        .await
+        .expect("ran");
+    assert_eq!(none.status.code(), Some(3));
+    assert!(none.stdout.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_guards_against_acting_twice_when_a_bulb_changes_address_mid_scan() {
+    // Two sockets with the same MAC simulate a bulb whose DHCP address changed
+    // mid-scan: DiscoveryStream reports the MAC from both addresses, so the
+    // CLI must act on it only once and count it once against `--expect`.
+    let first = MockBulb::builder().mac("9877d5230f0a").start().await;
+    let second = MockBulb::builder().mac("9877d5230f0a").start().await;
+    let addrs = [first.addr().to_string(), second.addr().to_string()];
+
+    let output = tokio::task::spawn_blocking({
+        let addrs = addrs.clone();
+        move || {
+            wizlight(&[
+                "--json",
+                "--stream",
+                "--broadcast",
+                &addrs[0],
+                "--broadcast",
+                &addrs[1],
+                "--wait",
+                SCAN,
+                "on",
+                "--all",
+                "--rgb",
+                "255,0,0",
+            ])
+        }
+    })
+    .await
+    .expect("streamed on ran");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "one bulb reported once: {stdout}"
+    );
+    let set_pilots = first
+        .requests()
+        .iter()
+        .chain(second.requests().iter())
+        .filter(|req| req.contains("\"setPilot\""))
+        .count();
+    assert_eq!(set_pilots, 1, "must never send setPilot twice to one MAC");
+
+    // Same MAC at two addresses must also emit one discover row and count as
+    // one distinct bulb against `--expect 2`.
+    let discover = tokio::task::spawn_blocking(move || {
+        wizlight(&[
+            "--json",
+            "--stream",
+            "--broadcast",
+            &addrs[0],
+            "--broadcast",
+            &addrs[1],
+            "--wait",
+            SCAN,
+            "--expect",
+            "2",
+            "discover",
+        ])
+    })
+    .await
+    .expect("streamed discover ran");
+
+    assert_eq!(discover.status.code(), Some(0));
+    let stdout = String::from_utf8(discover.stdout).expect("utf-8");
+    assert_eq!(stdout.lines().count(), 1, "one discover row: {stdout}");
 }

@@ -1,13 +1,17 @@
 //! `wizlight discover` — who is out there.
 
+use std::collections::HashSet;
+use std::io;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tokio::time::{Instant, timeout_at};
 
-use super::Outcome;
+use super::{Outcome, target};
 use crate::{Discovered, Discovery, SystemConfig};
 
-/// Broadcasts for `wait` and reports everything that answered.
+/// Broadcasts for up to `wait` (stopping early once `expect` distinct bulbs
+/// answer) and reports everything that answered, sorted by MAC.
 ///
 /// `getSystemConfig` is asked of each bulb as it appears, which is what turns
 /// a list of addresses into something a human can act on: the model is often
@@ -23,29 +27,99 @@ use crate::{Discovered, Discovery, SystemConfig};
 ///
 /// Only if the socket cannot be opened or the first broadcast cannot be sent;
 /// see [`Discovery::stream`].
-pub async fn run(discovery: &Discovery, wait: Duration) -> anyhow::Result<Outcome> {
-    let found = discovery.collect(wait).await?;
-    tracing::info!(bulbs = found.len(), ?wait, "scan finished");
+pub async fn run(
+    discovery: &Discovery,
+    wait: Duration,
+    expect: Option<usize>,
+) -> anyhow::Result<Outcome> {
+    let found = target::scan(discovery, wait, expect).await?;
+    tracing::info!(bulbs = found.len(), ?wait, ?expect, "scan finished");
     Ok(Outcome::new(payload(&found), listing(&found, wait)))
 }
 
-/// The `--json` payload: one object per bulb, in the order they answered.
+/// Streams each discovered bulb to `writer` as it answers, in arrival order.
+///
+/// Uses fixed-width MAC (12) and IP (15) columns in human mode so each line
+/// can be written immediately without waiting for every row; model and
+/// firmware stay ragged. Under `--json`, writes one NDJSON envelope per bulb.
+///
+/// Deduplicates on MAC so a bulb whose address changes mid-scan is reported
+/// once and counted once against `expect`.
+///
+/// # Errors
+///
+/// Fails if discovery cannot start or writing to `writer` fails.
+pub async fn run_stream<W: io::Write>(
+    discovery: &Discovery,
+    wait: Duration,
+    expect: Option<usize>,
+    json: bool,
+    writer: &mut W,
+) -> anyhow::Result<()> {
+    let mut stream = discovery.stream().await?;
+    let deadline = Instant::now() + wait;
+    let mut seen = HashSet::new();
+
+    while let Ok(Some(bulb)) = timeout_at(deadline, stream.recv()).await {
+        if !seen.insert(bulb.mac.clone()) {
+            continue;
+        }
+        let line = if json {
+            stream_json(&bulb)
+        } else {
+            stream_human(&bulb)
+        };
+        writeln!(writer, "{line}")?;
+        writer.flush()?;
+        if expect.is_some_and(|n| seen.len() >= n) {
+            break;
+        }
+    }
+
+    tracing::info!(
+        bulbs = seen.len(),
+        ?wait,
+        ?expect,
+        "streaming scan finished"
+    );
+    if seen.is_empty() && !json {
+        writeln!(writer, "no bulbs answered in {:.1}s", wait.as_secs_f32())?;
+        writer.flush()?;
+    }
+    Ok(())
+}
+
+fn bulb_json(bulb: &Discovered) -> Value {
+    let config = system_config(bulb);
+    json!({
+        "mac": bulb.mac,
+        "ip": bulb.ip().to_string(),
+        "port": bulb.addr.port(),
+        "model": config.as_ref().and_then(|c| c.module_name.clone()),
+        "firmware": config.as_ref().and_then(|c| c.fw_version.clone()),
+    })
+}
+
+/// The `--json` payload: one object per bulb, sorted by MAC.
 fn payload(found: &[Discovered]) -> Value {
-    Value::Array(
-        found
-            .iter()
-            .map(|bulb| {
-                let config = system_config(bulb);
-                json!({
-                    "mac": bulb.mac,
-                    "ip": bulb.ip().to_string(),
-                    "port": bulb.addr.port(),
-                    "model": config.as_ref().and_then(|c| c.module_name.clone()),
-                    "firmware": config.as_ref().and_then(|c| c.fw_version.clone()),
-                })
-            })
-            .collect(),
-    )
+    Value::Array(found.iter().map(bulb_json).collect())
+}
+
+fn stream_json(bulb: &Discovered) -> String {
+    super::render_json(&json!({
+        "ok": true,
+        "command": "discover",
+        "target": Value::Null,
+        "result": bulb_json(bulb),
+    }))
+}
+
+/// One streamed row: fixed-width MAC (12) and IPv4 (15), ragged model/firmware.
+fn stream_human(bulb: &Discovered) -> String {
+    let config = system_config(bulb);
+    let model = field(config.as_ref().and_then(|c| c.module_name.as_deref()));
+    let firmware = field(config.as_ref().and_then(|c| c.fw_version.as_deref()));
+    format!("{:<12}  {:<15}  {model}  {firmware}", bulb.mac, bulb.ip())
 }
 
 /// One bulb per line, MAC first.

@@ -394,7 +394,7 @@ async fn resolve(cli: &Cli, selection: &Target) -> anyhow::Result<Vec<target::Re
     }
 
     let discovery = cli.discovery(false)?;
-    target::resolve_all(&discovery, cli.wait).await
+    target::resolve_all(&discovery, cli.wait, cli.expect).await
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

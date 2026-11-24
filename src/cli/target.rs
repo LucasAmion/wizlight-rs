@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use tokio::time::{Instant, timeout_at};
 
-use crate::{Bulb, Discovery, Result, RetryPolicy};
+use crate::{Bulb, Discovered, Discovery, Result, RetryPolicy};
 
 /// A `<target>` argument: what was typed, and what it turned out to mean.
 ///
@@ -211,28 +211,59 @@ pub async fn resolve(
     .into())
 }
 
+/// Scans for up to `wait`, stopping early once `expect` distinct MACs have
+/// answered, and returns the results sorted by MAC.
+///
+/// Deduplicates on MAC rather than address so a bulb that changed address
+/// mid-scan updates its entry instead of counting twice against `expect`.
+pub(super) async fn scan(
+    discovery: &Discovery,
+    wait: Duration,
+    expect: Option<usize>,
+) -> Result<Vec<Discovered>> {
+    let mut stream = discovery.stream().await?;
+    let mut found: Vec<Discovered> = Vec::new();
+    let deadline = Instant::now() + wait;
+
+    while let Ok(Some(bulb)) = timeout_at(deadline, stream.recv()).await {
+        match found.iter_mut().find(|seen| seen.mac == bulb.mac) {
+            Some(seen) => *seen = bulb,
+            None => found.push(bulb),
+        }
+        if expect.is_some_and(|n| found.len() >= n) {
+            break;
+        }
+    }
+    // Answering order is arrival order, which is effectively random. Sorting
+    // by MAC keeps buffered output stable between runs so it stays diffable.
+    found.sort_by(|a, b| a.mac.cmp(&b.mac));
+    Ok(found)
+}
+
 /// Every bulb a scan finds, for `--all`.
+///
+/// Stops early once `expect` distinct bulbs have answered, running for the
+/// full `wait` window otherwise.
 ///
 /// # Errors
 ///
 /// [`NotFound::Nothing`] if the scan finds none — unlike `discover`, where an
 /// empty list is the answer, a fan-out with nothing to fan out to did not do
 /// what was asked.
-pub async fn resolve_all(discovery: &Discovery, wait: Duration) -> anyhow::Result<Vec<Resolved>> {
-    let found = discovery.collect(wait).await?;
+pub async fn resolve_all(
+    discovery: &Discovery,
+    wait: Duration,
+    expect: Option<usize>,
+) -> anyhow::Result<Vec<Resolved>> {
+    let found = scan(discovery, wait, expect).await?;
     if found.is_empty() {
         return Err(NotFound::Nothing { wait }.into());
     }
-    let mut bulbs: Vec<Resolved> = found
+    Ok(found
         .into_iter()
         .map(|bulb| Resolved {
             addr: bulb.addr,
             mac: Some(bulb.mac),
         })
-        .collect();
-    // Answering order is arrival order, which is effectively random. Sorting
-    // by MAC keeps a fan-out's output stable between runs, so two of them can
-    // be diffed.
-    bulbs.sort_by(|a, b| a.mac.cmp(&b.mac));
-    Ok(bulbs)
+        .collect())
 }

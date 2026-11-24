@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CLI `--stream` global flag: prints discovered bulbs and dispatches `--all`
+  fan-out actions as each distinct bulb answers in arrival order rather than
+  waiting for the full `--wait` window. Guards against acting twice if a bulb
+  changes address mid-scan, uses fixed-width MAC (12) and IP (15) columns for
+  human `discover` rows, and emits one envelope per bulb as NDJSON under
+  `--json`.
+- CLI `--expect N` global flag: stops `discover` and `--all` scans as soon as
+  `N` distinct bulbs have answered (falling back to the full `--wait` window
+  otherwise), keeping the buffered output shape unchanged.
+
+### Changed
+
+- Buffered `discover` now sorts results by MAC, matching buffered `--all`
+  commands so output stays diffable between runs.
+
 ## [0.1.0] — 2026-11-24
 
 First stable release of `wizlight` — both the async Rust library (`default-features = false`)

@@ -13,8 +13,8 @@
 //! # The `--json` contract
 //!
 //! Every finite command emits one JSON object, and the envelope is the same
-//! whether the command worked or not. `watch` emits one such object per update
-//! as newline-delimited JSON:
+//! whether the command worked or not. `watch` and `--stream` emit one such
+//! object per event or bulb as newline-delimited JSON:
 //!
 //! ```json
 //! {"ok": true,  "command": "discover", "target": null,        "result": []}
@@ -35,7 +35,7 @@
 //! named target, and `4` ([`EXIT_TIMEOUT`]) when a bulb was found and then
 //! stopped answering.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -48,6 +48,7 @@ use clap_complete::Shell;
 use if_addrs::IfAddr;
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
+use tokio::time::{Instant, sleep_until};
 
 mod bench;
 mod describe;
@@ -127,6 +128,26 @@ pub struct Cli {
         value_parser = seconds
     )]
     pub wait: Duration,
+
+    /// Report and act on bulbs as they answer rather than waiting for the scan to end.
+    ///
+    /// Applies to `discover` and `--all` commands. Under `--json`, emits
+    /// newline-delimited JSON (one object per bulb) instead of a buffered
+    /// array. Human `discover` output uses fixed-width MAC and IP columns in
+    /// arrival order instead of sorting and padding across every row.
+    #[arg(long, global = true, action = ArgAction::SetTrue)]
+    pub stream: bool,
+
+    /// Stop a discovery scan as soon as N distinct bulbs have answered.
+    ///
+    /// Runs for the full `--wait` window if fewer than N bulbs respond.
+    #[arg(
+        long,
+        global = true,
+        value_name = "COUNT",
+        value_parser = non_zero_usize
+    )]
+    pub expect: Option<usize>,
 
     /// Override the address discovery broadcasts to. Repeatable.
     ///
@@ -265,6 +286,17 @@ fn seconds(input: &str) -> Result<Duration, String> {
         .parse()
         .map_err(|_| format!("`{input}` is not a number of seconds"))?;
     Duration::try_from_secs_f64(secs).map_err(|err| format!("`{input}`: {err}"))
+}
+
+/// Parses a strictly positive count for `--expect`.
+fn non_zero_usize(input: &str) -> Result<usize, String> {
+    let value: usize = input
+        .parse()
+        .map_err(|_| format!("`{input}` is not a positive integer"))?;
+    if value == 0 {
+        return Err("expected a count of at least 1".to_owned());
+    }
+    Ok(value)
 }
 
 /// Parses an address, supplying the WiZ [`PORT`] when none was given.
@@ -517,17 +549,42 @@ impl Outcome {
     }
 }
 
+impl Cli {
+    /// Whether this invocation streams incremental output instead of returning
+    /// one buffered [`Outcome`].
+    fn streams_output(&self) -> bool {
+        if !self.stream {
+            return false;
+        }
+        match &self.command {
+            Command::Discover => true,
+            Command::Status(target)
+            | Command::Info(target)
+            | Command::Scenes(target)
+            | Command::Off(target)
+            | Command::Toggle(target) => target.all,
+            Command::On(write) | Command::Set(write) => write.target.all,
+            Command::Pulse(pulse) => pulse.target.all,
+            Command::Watch(_) | Command::Bench(_) | Command::Completions { .. } => false,
+        }
+    }
+}
+
 /// Runs the selected command.
 ///
 /// # Errors
 ///
-/// Whatever the command failed with. `watch` is handled by [`run`] because it
-/// streams rather than producing one outcome; commands still stubbed say so.
+/// Whatever the command failed with. `watch` and `--stream` invocations are
+/// handled by [`run`] because they stream output incrementally rather than
+/// producing one buffered [`Outcome`].
 pub async fn run_command(cli: &Cli) -> anyhow::Result<Outcome> {
+    if cli.streams_output() {
+        anyhow::bail!("`--stream` streams output and must be run as the CLI process");
+    }
     match &cli.command {
         Command::Discover => {
             let discovery = cli.discovery(true)?;
-            discover::run(&discovery, cli.wait).await
+            discover::run(&discovery, cli.wait, cli.expect).await
         }
         Command::Status(target) => {
             act(
@@ -633,7 +690,7 @@ where
     }
 
     let discovery = cli.discovery(false)?;
-    let bulbs = target::resolve_all(&discovery, cli.wait).await?;
+    let bulbs = target::resolve_all(&discovery, cli.wait, cli.expect).await?;
     tracing::info!(bulbs = bulbs.len(), "fanning out");
 
     // Concurrently, because the alternative is a round trip per bulb in
@@ -659,6 +716,211 @@ where
     }
     results.sort_by(|(a, _), (b, _)| a.cmp(b));
     Ok(collect(results))
+}
+
+/// Runs a streaming `discover` or `--all` fan-out, writing each bulb's output
+/// to `writer` as soon as it completes.
+///
+/// Returns `Ok(true)` if everything succeeded and `Ok(false)` if one or more
+/// bulbs failed in a fan-out (their errors have already been written to
+/// `writer`).
+async fn run_streaming<W: io::Write>(cli: &Cli, writer: &mut W) -> anyhow::Result<bool> {
+    match &cli.command {
+        Command::Discover => {
+            let discovery = cli.discovery(true)?;
+            discover::run_stream(&discovery, cli.wait, cli.expect, cli.json, writer).await?;
+            Ok(true)
+        }
+        Command::Status(_) => {
+            act_stream(
+                cli,
+                |bulb| async move { pilot::status(&bulb).await },
+                writer,
+            )
+            .await
+        }
+        Command::Info(_) => {
+            act_stream(
+                cli,
+                |bulb| async move { describe::info(&bulb).await },
+                writer,
+            )
+            .await
+        }
+        Command::Scenes(_) => {
+            act_stream(
+                cli,
+                |bulb| async move { describe::scenes(&bulb).await },
+                writer,
+            )
+            .await
+        }
+        Command::On(write) => {
+            let options = write.options.clone();
+            act_stream(
+                cli,
+                move |bulb| {
+                    let options = options.clone();
+                    async move { pilot::power(&bulb, true, &options).await }
+                },
+                writer,
+            )
+            .await
+        }
+        Command::Off(_) => {
+            act_stream(
+                cli,
+                |bulb| async move { pilot::power(&bulb, false, &StateOptions::default()).await },
+                writer,
+            )
+            .await
+        }
+        Command::Toggle(_) => {
+            act_stream(
+                cli,
+                |bulb| async move { pilot::toggle(&bulb).await },
+                writer,
+            )
+            .await
+        }
+        Command::Set(write) => {
+            let options = write.options.clone();
+            act_stream(
+                cli,
+                move |bulb| {
+                    let options = options.clone();
+                    async move { pilot::set(&bulb, &options).await }
+                },
+                writer,
+            )
+            .await
+        }
+        Command::Pulse(pulse) => {
+            let delta = pulse.delta;
+            let duration = pulse.duration;
+            act_stream(
+                cli,
+                move |bulb| async move { pilot::pulse(&bulb, delta, duration).await },
+                writer,
+            )
+            .await
+        }
+        _ => anyhow::bail!("`{}` does not stream output", cli.command.name()),
+    }
+}
+
+/// Discovers bulbs and dispatches `op` to each distinct MAC as soon as it
+/// answers, writing each bulb's result to `writer` as it finishes.
+///
+/// Guards against acting twice on one bulb: [`Discovery::stream`] re-reports a
+/// bulb whose IP address changed mid-scan, so previously seen MACs are ignored.
+async fn act_stream<F, Fut, W>(cli: &Cli, op: F, writer: &mut W) -> anyhow::Result<bool>
+where
+    F: Fn(Bulb) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = anyhow::Result<Report>> + Send + 'static,
+    W: io::Write,
+{
+    let discovery = cli.discovery(false)?;
+    let policy = cli.policy();
+    let command_name = cli.command.name();
+    let deadline = Instant::now() + cli.wait;
+
+    let mut stream = Some(discovery.stream().await?);
+    let sleep = sleep_until(deadline);
+    tokio::pin!(sleep);
+
+    let mut seen = HashSet::new();
+    let mut tasks = JoinSet::new();
+    let mut any_failed = false;
+
+    loop {
+        tokio::select! {
+            () = &mut sleep, if stream.is_some() => {
+                stream = None;
+            }
+            item = async {
+                stream
+                    .as_mut()
+                    .expect("guarded by stream.is_some()")
+                    .recv()
+                    .await
+            }, if stream.is_some() => {
+                match item {
+                    Some(bulb) => {
+                        if !seen.insert(bulb.mac.clone()) {
+                            continue;
+                        }
+                        tracing::info!(mac = %bulb.mac, addr = %bulb.addr, "dispatching to discovered bulb");
+                        let resolved = Resolved {
+                            addr: bulb.addr,
+                            mac: Some(bulb.mac),
+                        };
+                        let op = op.clone();
+                        let policy = policy.clone();
+                        tasks.spawn(async move {
+                            let label = resolved.label();
+                            let result = match resolved.connect(&policy).await {
+                                Ok(handle) => op(handle).await,
+                                Err(err) => Err(err.into()),
+                            };
+                            (label, result)
+                        });
+                        if cli.expect.is_some_and(|n| seen.len() >= n) {
+                            stream = None;
+                        }
+                    }
+                    None => {
+                        stream = None;
+                    }
+                }
+            }
+            Some(joined) = tasks.join_next(), if !tasks.is_empty() => {
+                let (label, result) = joined?;
+                if result.is_err() {
+                    any_failed = true;
+                }
+                let line = render_stream_item(command_name, &label, &result, cli.json);
+                writeln!(writer, "{line}")?;
+                writer.flush()?;
+            }
+            else => break,
+        }
+    }
+
+    if seen.is_empty() {
+        return Err(NotFound::Nothing { wait: cli.wait }.into());
+    }
+    Ok(!any_failed)
+}
+
+fn render_stream_item(
+    command: &str,
+    label: &str,
+    result: &anyhow::Result<Report>,
+    json: bool,
+) -> String {
+    if json {
+        let payload = match result {
+            Ok(report) => json!({
+                "ok": true,
+                "command": command,
+                "target": label,
+                "result": report.json,
+            }),
+            Err(err) => json!({
+                "ok": false,
+                "command": command,
+                "target": label,
+                "error": err.to_string(),
+            }),
+        };
+        render_json(&payload)
+    } else {
+        match result {
+            Ok(report) => prefixed(label, &report.human),
+            Err(err) => prefixed(label, &format!("error: {err}")),
+        }
+    }
 }
 
 /// Turns per-bulb results into one outcome.
@@ -805,6 +1067,8 @@ pub fn run() -> ExitCode {
         target = cli.command.target(),
         timeout = ?cli.timeout,
         wait = ?cli.wait,
+        stream = cli.stream,
+        expect = ?cli.expect,
         broadcast = ?cli.broadcast,
         json = cli.json,
         "parsed invocation"
@@ -825,13 +1089,26 @@ pub fn run() -> ExitCode {
         }
     };
 
+    enum RunResult {
+        Buffered(Outcome),
+        Streamed(bool),
+    }
+
     let result = match &cli.command {
-        Command::Watch(target) => runtime.block_on(watch::run(&cli, target)).map(|()| None),
-        _ => runtime.block_on(run_command(&cli)).map(Some),
+        Command::Watch(target) => runtime
+            .block_on(watch::run(&cli, target))
+            .map(|()| RunResult::Streamed(true)),
+        _ if cli.streams_output() => {
+            let mut stdout = io::stdout().lock();
+            runtime
+                .block_on(run_streaming(&cli, &mut stdout))
+                .map(RunResult::Streamed)
+        }
+        _ => runtime.block_on(run_command(&cli)).map(RunResult::Buffered),
     };
 
     match result {
-        Ok(Some(outcome)) => {
+        Ok(RunResult::Buffered(outcome)) => {
             println!("{}", outcome.render(&cli.command, cli.json));
             if outcome.succeeded() {
                 ExitCode::SUCCESS
@@ -841,7 +1118,8 @@ pub fn run() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-        Ok(None) => ExitCode::SUCCESS,
+        Ok(RunResult::Streamed(true)) => ExitCode::SUCCESS,
+        Ok(RunResult::Streamed(false)) => ExitCode::FAILURE,
         Err(err) => {
             eprintln!(
                 "{}",
