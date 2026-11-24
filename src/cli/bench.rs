@@ -1511,4 +1511,247 @@ mod tests {
         assert_eq!(final_pilot["sceneId"], 11, "{final_pilot}");
         assert_eq!(final_pilot["dimming"], 45, "{final_pilot}");
     }
+
+    #[test]
+    fn bench_report_human_and_json_match_snapshots() {
+        let cli = Cli::try_parse_from([
+            "wizlight",
+            "bench",
+            "9877d5230f0a",
+            "--rates",
+            "5,50",
+            "--hold",
+            "1",
+            "--pulse-durations",
+            "50,150",
+            "--pulse-delta",
+            "-80",
+        ])
+        .expect("parse");
+        let super::super::Command::Bench(bench) = &cli.command else {
+            panic!("expected bench");
+        };
+        let initial: Pilot = serde_json::from_value(json!({
+            "mac": "9877d5230f0a",
+            "rssi": -52,
+            "state": true
+        }))
+        .unwrap();
+        let bulb_type = BulbType::from_data(&crate::protocol::BulbData {
+            module_name: Some("ESP25_SHRGB_01"),
+            type_id: None,
+            fw_version: Some("1.38.0"),
+            kelvin_range: Some(crate::KelvinRange::new(2200, 6500)),
+            white_channels: Some(1),
+            white_to_color_ratio: Some(80),
+            fan_speed_range: None,
+        })
+        .unwrap();
+        let rtt = RttStats {
+            min: 18.4,
+            median: 24.5,
+            p95: 41.2,
+            max: 49.0,
+            jitter: 6.15,
+        };
+        let rate_sweep = [
+            StepSummary {
+                rate_hz: 5.0,
+                interval_ms: 200.0,
+                sent: 5,
+                responses: 5,
+                inferred_drops: 0,
+                loss_pct: 0.0,
+                rtt_ms: Some(rtt),
+            },
+            StepSummary {
+                rate_hz: 50.0,
+                interval_ms: 20.0,
+                sent: 50,
+                responses: 49,
+                inferred_drops: 1,
+                loss_pct: 2.0,
+                rtt_ms: Some(rtt),
+            },
+        ];
+        let latency = LatencyResult {
+            pattern: "black_to_white_step",
+            trials: 3,
+            sent: 3,
+            responses: 3,
+            inferred_drops: 0,
+            socket_rtt_ms: Some(rtt),
+        };
+        let interpolation = InterpolationResult {
+            step_pattern: "red_to_blue_step",
+            step_sent: 1,
+            step_responses: 1,
+            step_drops: 0,
+            step_rtt_ms: Some(rtt),
+            alt_pattern: "red_blue_alternation",
+            alt_rate_hz: 20.0,
+            alt_sent: 20,
+            alt_responses: 20,
+            alt_drops: 0,
+            alt_loss_pct: 0.0,
+            alt_rtt_ms: Some(rtt),
+        };
+        let pulse_sweep = [
+            PulseStepSummary {
+                delta: -80,
+                duration_ms: 50,
+                sent: 1,
+                responses: 1,
+                inferred_drops: 0,
+                socket_rtt_ms: Some(22.1),
+            },
+            PulseStepSummary {
+                delta: -80,
+                duration_ms: 150,
+                sent: 1,
+                responses: 1,
+                inferred_drops: 0,
+                socket_rtt_ms: Some(25.4),
+            },
+        ];
+
+        let report = build_report(
+            &initial,
+            Some(&bulb_type),
+            bench,
+            &rate_sweep,
+            &latency,
+            &interpolation,
+            &pulse_sweep,
+            true,
+        );
+
+        insta::assert_snapshot!(report.human, @r"
+        device        ESP25_SHRGB_01  fw 1.38.0  RGB  -52 dBm
+          rate (Hz)  sent  ack  drop    loss   min ms   p50 ms   p95 ms   max ms  jitter ms
+               5.00     5    5     0    0.0%    18.40    24.50    41.20    49.00       6.15
+              50.00    50   49     1    2.0%    18.40    24.50    41.20    49.00       6.15
+        latency       black_to_white_step  3/3 ack  socket p50 24.50 ms (min 18.40, p95 41.20, max 49.00, jitter 6.15)
+        camera        Film the terminal stderr LATENCY_STEP marker and the bulb together at >=120 fps; packet-to-photon latency_ms = (first_lit_frame - marker_frame) * (1000 / fps).
+        interpolate   red_to_blue_step 1/1 ack (24.50 ms); red_blue_alternation @ 20.00 Hz 20/20 ack (0 drops, p50 24.50 ms)
+        pulse         delta -80%  50ms (22.10 ms), 150ms (25.40 ms)
+        restored      yes
+        ");
+        insta::assert_json_snapshot!(report.json, @r#"
+        {
+          "config": {
+            "hold_ms": 1000,
+            "max_rate_hz": 50.0,
+            "method": "setPilot",
+            "min_rate_hz": 5.0,
+            "mode": "auto",
+            "steps": 2
+          },
+          "device": {
+            "class": "RGB",
+            "firmware": "1.38.0",
+            "mac": "9877d5230f0a",
+            "model": "ESP25_SHRGB_01",
+            "rssi": -52
+          },
+          "interpolation_probe": {
+            "abrupt_step": {
+              "inferred_drops": 0,
+              "pattern": "red_to_blue_step",
+              "responses": 1,
+              "sent": 1,
+              "socket_rtt_ms": {
+                "jitter": 6.15,
+                "max": 49.0,
+                "median": 24.5,
+                "min": 18.4,
+                "p95": 41.2
+              }
+            },
+            "procedure": "At >=120 fps, <=1 intermediate frame on INTERPOLATION_STEP indicates a hardware snap; >=2 monotonic intermediate frames indicates an internal ramp of (frames / fps) seconds. A steady blend during INTERPOLATION_ALT indicates the ramp time constant exceeds 1 / (2 * rate_hz).",
+            "rapid_alternation": {
+              "inferred_drops": 0,
+              "loss_pct": 0.0,
+              "pattern": "red_blue_alternation",
+              "rate_hz": 20.0,
+              "responses": 20,
+              "sent": 20,
+              "socket_rtt_ms": {
+                "jitter": 6.15,
+                "max": 49.0,
+                "median": 24.5,
+                "min": 18.4,
+                "p95": 41.2
+              }
+            }
+          },
+          "latency_probe": {
+            "inferred_drops": 0,
+            "pattern": "black_to_white_step",
+            "procedure": "Film the terminal stderr LATENCY_STEP marker and the bulb together at >=120 fps; packet-to-photon latency_ms = (first_lit_frame - marker_frame) * (1000 / fps).",
+            "responses": 3,
+            "sent": 3,
+            "socket_rtt_ms": {
+              "jitter": 6.15,
+              "max": 49.0,
+              "median": 24.5,
+              "min": 18.4,
+              "p95": 41.2
+            },
+            "trials": 3
+          },
+          "pulse_sweep": [
+            {
+              "delta": -80,
+              "duration_ms": 50,
+              "inferred_drops": 0,
+              "responses": 1,
+              "sent": 1,
+              "socket_rtt_ms": 22.1
+            },
+            {
+              "delta": -80,
+              "duration_ms": 150,
+              "inferred_drops": 0,
+              "responses": 1,
+              "sent": 1,
+              "socket_rtt_ms": 25.4
+            }
+          ],
+          "rate_sweep": [
+            {
+              "inferred_drops": 0,
+              "interval_ms": 200.0,
+              "loss_pct": 0.0,
+              "rate_hz": 5.0,
+              "responses": 5,
+              "rtt_ms": {
+                "jitter": 6.15,
+                "max": 49.0,
+                "median": 24.5,
+                "min": 18.4,
+                "p95": 41.2
+              },
+              "sent": 5
+            },
+            {
+              "inferred_drops": 1,
+              "interval_ms": 20.0,
+              "loss_pct": 2.0,
+              "rate_hz": 50.0,
+              "responses": 49,
+              "rtt_ms": {
+                "jitter": 6.15,
+                "max": 49.0,
+                "median": 24.5,
+                "min": 18.4,
+                "p95": 41.2
+              },
+              "sent": 50
+            }
+          ],
+          "restored": true
+        }
+        "#);
+    }
 }
