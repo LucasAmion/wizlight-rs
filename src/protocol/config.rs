@@ -8,7 +8,7 @@ use super::KelvinRange;
 ///
 /// Unknown fields are ignored. Older firmware omits several of the keys the
 /// 1.38.0 capture carries, so everything interesting is optional.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SystemConfig {
     /// Bulb MAC.
@@ -75,7 +75,7 @@ impl SystemConfig {
 /// assert_eq!(config.kelvin_range(), Some(KelvinRange::new(2200, 6500)));
 /// # Ok::<(), wizlight::Error>(())
 /// ```
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelConfig {
     /// White-to-colour ratio.
@@ -113,7 +113,7 @@ impl ModelConfig {
 ///
 /// On firmware before `getModelConfig` existed, the white range lives here
 /// (`extRange` preferred, then `whiteRange`).
-#[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default)]
 pub struct UserConfig {
     /// Extended white range.

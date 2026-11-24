@@ -323,13 +323,13 @@ impl KelvinRange {
         }
     }
 
-    /// The coldest temperature the device honours.
+    /// The warmest (lowest Kelvin) temperature the device honours.
     #[must_use]
     pub const fn min(self) -> u16 {
         self.min
     }
 
-    /// The warmest temperature the device honours.
+    /// The coolest (highest Kelvin) temperature the device honours.
     #[must_use]
     pub const fn max(self) -> u16 {
         self.max

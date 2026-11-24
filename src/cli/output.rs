@@ -19,11 +19,7 @@ impl OutputRenderer for JsonRenderer {
 
 /// Renderer for human-readable terminal output.
 ///
-/// A string is emitted as-is, which is what the scaffold produces. Anything
-/// structured falls back to indented JSON until there are typed payloads worth
-/// laying out properly — the commands that will produce them do not exist yet,
-/// and a table formatter with nothing to format would only have to be guessed
-/// at twice.
+/// Emits strings as-is and falls back to indented JSON for structured values.
 pub struct HumanRenderer;
 
 impl OutputRenderer for HumanRenderer {

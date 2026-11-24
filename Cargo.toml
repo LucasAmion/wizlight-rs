@@ -1,7 +1,7 @@
 [package]
 name = "wizlight"
-# Beta freezes the public API following the R1 hardware rate spike.
-version = "0.1.0-beta.1"
+# Release candidate for 0.1.0, exercising all install paths before the final tag.
+version = "0.1.0-rc.1"
 edition = "2024"
 # Floor is set by clap 4.6 and by edition 2024; both need 1.85.
 rust-version = "1.85"

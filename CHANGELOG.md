@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-rc.1] — 2026-11-24
+
+Release candidate for `0.1.0`, cut to verify every distribution path —
+crates.io, Homebrew, shell/PowerShell installers, raw archives and non-Ubuntu
+Linux — before tagging the stable release.
+
+### Added
+
+- `Eq` derives on `SystemConfig`, `ModelConfig` and `UserConfig`, matching the
+  rest of the protocol types.
+- `TryFrom` conversions for `Dimming`, `Speed`, `Kelvin`, `Ratio`, `Devices`
+  and `PulseDelta`, matching `SceneId`.
+- Inline snapshot coverage for human and `--json` CLI output across every
+  command, plus mock-bulb fidelity tests aligned with recorded hardware
+  captures (`reset`, bare `speed` on `sceneId: 0`, channel byte truncation and
+  out-of-range `dimming`).
+- CI, crates.io, docs.rs and MIT license badges in `README.md`.
+
+### Changed
+
+- Updated macOS ARM64 release runner to `macos-15` following GitHub's
+  retirement of `macos-14`.
+- Refreshed README capabilities section and updated dependency lockfile.
+
+### Fixed
+
+- Swapped `"coldest"` / `"warmest"` descriptions on `KelvinRange::min` and
+  `KelvinRange::max` (lower Kelvin is warmer; higher Kelvin is cooler).
+- Removed stale pre-implementation scaffold notes from CLI rustdoc comments.
+
 ## [0.1.0-beta.1] — 2026-11-10
 
 The beta where the public API is frozen following the R1 hardware rate spike and
@@ -419,7 +449,8 @@ is only reachable by asking for `0.1.0-alpha.1` exactly.
   error explaining that.
 
 [light-modes]: https://docs.pro.wizconnected.com/#light-modes
-[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-beta.1...HEAD
+[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0-rc.1...HEAD
+[0.1.0-rc.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-rc.1
 [0.1.0-beta.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-beta.1
 [0.1.0-alpha.4]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-alpha.3

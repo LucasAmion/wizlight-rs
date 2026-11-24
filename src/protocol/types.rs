@@ -62,6 +62,14 @@ macro_rules! bounded_newtype {
             }
         }
 
+        impl TryFrom<$repr> for $name {
+            type Error = Error;
+
+            fn try_from(value: $repr) -> Result<Self> {
+                Self::new(value)
+            }
+        }
+
         impl From<$name> for $repr {
             fn from(value: $name) -> Self {
                 value.0
@@ -427,6 +435,14 @@ impl PulseDelta {
     }
 }
 
+impl TryFrom<i32> for PulseDelta {
+    type Error = Error;
+
+    fn try_from(value: i32) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
 impl From<PulseDelta> for i32 {
     fn from(value: PulseDelta) -> Self {
         value.0
@@ -533,5 +549,21 @@ mod tests {
             message.contains("dimming must be 1..=100, got 0"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn try_from_matches_new_on_bounded_types() {
+        assert_eq!(Dimming::try_from(50).unwrap().get(), 50);
+        assert!(Dimming::try_from(0).is_err());
+        assert_eq!(Speed::try_from(100).unwrap().get(), 100);
+        assert!(Speed::try_from(9).is_err());
+        assert_eq!(Kelvin::try_from(2700).unwrap().get(), 2700);
+        assert!(Kelvin::try_from(999).is_err());
+        assert_eq!(Ratio::try_from(50).unwrap().get(), 50);
+        assert!(Ratio::try_from(101).is_err());
+        assert_eq!(Devices::try_from(1).unwrap().get(), 1);
+        assert!(Devices::try_from(4).is_err());
+        assert_eq!(PulseDelta::try_from(-60).unwrap().get(), -60);
+        assert!(PulseDelta::try_from(0).is_err());
     }
 }
