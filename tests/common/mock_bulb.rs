@@ -62,11 +62,12 @@
 //!   **empty `params` object** or an **unknown parameter key** (such as
 //!   `{"nonsense":1}`) is `-32600` — a different code for what looks like the
 //!   same mistake.
-//! - `reboot` is **refused** with `-32600 Invalid Request` in every spelling of
-//!   `params` (absent, `{}`, `null`), and the bulb carries on answering without
-//!   rebooting. Note the code: `-32601 Method not found` would mean the
-//!   firmware lacked the method, and it does not. `pywizlight` sends `reboot`
-//!   and ignores the reply, which is why nobody noticed.
+//! - `reboot` and `reset` are both **refused** with `-32600 Invalid Request`
+//!   in every spelling of `params` (absent, `{}`, `null`), and the bulb
+//!   carries on answering without rebooting or unpairing. Note the code:
+//!   `-32601 Method not found` would mean the firmware lacked the method, and
+//!   it does not. `pywizlight` sends both and ignores the reply, which is why
+//!   nobody noticed.
 //! - Garbage that is not JSON draws `-32700`, in a reply with no `method`.
 //! - `getPower` is **not socket-only**: the RGB personality answers it, always
 //!   with `0`, whatever the bulb is doing.
@@ -84,9 +85,6 @@
 //! Anything the hardware captures do not cover is left unmodelled and listed
 //! here so the boundary between measured truth and test scaffolding is explicit:
 //!
-//! - `reset` is **not** measured and never will be: it is a factory reset that
-//!   unpairs the bulb and clears its Wi-Fi credentials. It is assumed to return
-//!   `-32600 Invalid Request` like `reboot`.
 //! - Dual-head (`ESP20_DHRGB_01`) behaviour: no dual-head unit is on hand, so
 //!   accepting `devices: 2` on write, `devices: 1` on `getPilot`, and retaining
 //!   `ratio` / `devices` in `Personality::dual_head()` is assumed from
@@ -684,9 +682,9 @@ impl Shared {
                     pulse_timer: None,
                 }
             }
-            // Measured: `reboot` is refused with -32600 in every params shape,
-            // and the bulb does not reboot. `reset` is untested and assumed to
-            // match. See the fidelity notes at the top of the module.
+            // Measured: both `reboot` and `reset` are refused with -32600 in
+            // every params shape, and the bulb neither reboots nor unpairs.
+            // See the fidelity notes at the top of the module.
             "reboot" | "reset" => reply(latency, error(method, -32600, "Invalid Request")),
             "setPilot" | "setState" => {
                 match apply(

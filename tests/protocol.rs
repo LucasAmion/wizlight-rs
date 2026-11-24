@@ -534,14 +534,21 @@ async fn reboot_is_refused_by_the_hardware_and_says_so() {
 }
 
 #[tokio::test]
-async fn reset_is_assumed_to_behave_like_reboot() {
-    // Untested on hardware, and staying that way: measuring a factory reset
-    // costs a re-paired bulb.
+async fn reset_is_refused_by_the_hardware_like_reboot() {
+    // Measured on ESP25_SHRGB_01 fw 1.38.0: `reset` also returns -32600
+    // Invalid Request in every params shape without unpairing or resetting.
     let bulb = MockBulb::start().await;
     let client = connect(&bulb).await;
 
-    let err = client.reset().await.expect_err("assumed refused");
-    assert!(matches!(err, Error::Device { code: -32600, .. }), "{err}");
+    let err = client
+        .reset()
+        .await
+        .expect_err("the hardware refuses reset");
+    assert!(
+        matches!(&err, Error::Device { code: -32600, method, .. } if method == "reset"),
+        "{err}"
+    );
+    assert!(!matches!(err, Error::Timeout { .. }));
 }
 
 #[tokio::test]

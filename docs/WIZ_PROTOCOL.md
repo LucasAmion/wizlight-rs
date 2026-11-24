@@ -218,11 +218,12 @@ supplies `extRange` or `whiteRange`.
 always returned zero, whether on or off. Treat its unit and usefulness as
 unverified for every model.
 
-`reboot` was **measured** as implemented but refused with `-32600` on firmware
-1.38.0. `reset` is deliberately **unmeasured** because a successful factory
-reset clears pairing and Wi-Fi credentials. Both calls treat silence as
-possible success: a device that actually rebooted cannot acknowledge afterward,
-while an explicit error remains a failure.
+Both `reboot` and `reset` were **measured** on `ESP25_SHRGB_01` firmware 1.38.0
+as implemented but refused with `-32600 Invalid Request` in every `params`
+shape (absent, `{}` or `null`), leaving the bulb running and paired. Both
+calls still treat silence as possible success: a device on another model or
+firmware that actually rebooted or reset cannot acknowledge afterward, while an
+explicit error remains a failure.
 
 ## `moduleName` and capabilities
 

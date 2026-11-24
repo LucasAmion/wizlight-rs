@@ -1114,13 +1114,16 @@ async fn unknown_pilot_params_and_reboot_return_invalid_request_32600() {
     assert_eq!(reply["error"]["message"], "Invalid Request");
     assert!(bulb.pilot().get("nonsense").is_none());
 
-    for reboot in [
-        json!({"method": "reboot"}),
-        json!({"method": "reboot", "params": {}}),
-        json!({"method": "reboot", "params": null}),
-    ] {
-        let reply = client.ask(bulb.addr(), reboot.clone()).await;
-        assert_eq!(reply["error"]["code"], -32600, "{reboot}");
-        assert_eq!(reply["error"]["message"], "Invalid Request", "{reboot}");
+    for method in ["reboot", "reset"] {
+        for req in [
+            json!({"method": method}),
+            json!({"method": method, "params": {}}),
+            json!({"method": method, "params": null}),
+        ] {
+            let reply = client.ask(bulb.addr(), req.clone()).await;
+            assert_eq!(reply["method"], method, "{req}");
+            assert_eq!(reply["error"]["code"], -32600, "{req}");
+            assert_eq!(reply["error"]["message"], "Invalid Request", "{req}");
+        }
     }
 }
