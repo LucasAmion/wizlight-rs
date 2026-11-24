@@ -30,11 +30,10 @@
 //!
 //! # Exit codes
 //!
-//! `0` success, `2` for a usage error — clap's own, before anything runs —
-//! and `1` for everything else. The distinct codes for *not found* and *timed
-//! out* wait for the commands that can produce them: discovery reports what
-//! answered, and nothing here yet fails at a bulb that was supposed to be
-//! listening.
+//! `0` success, `1` general failure, `2` usage error (clap's own, before
+//! anything runs), `3` ([`EXIT_NOT_FOUND`]) when nothing answered to the
+//! named target, and `4` ([`EXIT_TIMEOUT`]) when a bulb was found and then
+//! stopped answering.
 
 use std::collections::BTreeSet;
 use std::future::Future;

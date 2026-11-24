@@ -1,5 +1,10 @@
 # wizlight
 
+[![CI](https://github.com/LucasAmion/wizlight-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/LucasAmion/wizlight-rs/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/wizlight.svg)](https://crates.io/crates/wizlight)
+[![docs.rs](https://docs.rs/wizlight/badge.svg)](https://docs.rs/wizlight)
+[![License: MIT](https://img.shields.io/crates/l/wizlight.svg)](https://github.com/LucasAmion/wizlight-rs/blob/main/LICENSE)
+
 An async Rust client for **Philips WiZ** smart bulbs, speaking the local UDP
 protocol directly — no cloud, no account, no hub. The crate ships both a library
 and a `wizlight` command-line tool.
@@ -8,31 +13,31 @@ It is a port of the parts of [`pywizlight`][pywizlight] that matter for
 real-time control, and it is the protocol layer underneath
 [WiZzard](https://github.com/LucasAmion/wizzard).
 
-> **Status: beta development, and the public API is frozen.** The
-> request/response transport, discovery, typed pilot/config methods, the
-> measured 5 Hz rate-limited streaming path, the `syncPilot` push listener and
-> the full CLI surface — `discover`, `status`, `info`, `on`, `off`, `toggle`,
-> `set`, `pulse`, `scenes`, `watch` and `bench` — are in.
+> **Status: release candidate (`0.1.0-rc.1`).** The public API is frozen and
+> ready for `0.1.0` once clean-machine install verification across crates.io,
+> Homebrew, shell installers and prebuilt archives completes.
 >
-> Prereleases are published to keep the release path exercised rather than to be
-> depended on, so **every version below has to be spelled out in full**. Cargo
-> does not match a prerelease against an ordinary requirement: `wizlight = "0.1"`
+> Cargo does not match a prerelease against an ordinary requirement: `wizlight = "0.1"`
 > resolves to nothing, and plain `cargo install wizlight` fails, until `0.1.0`
-> is out.
+> is out — spell `0.1.0-rc.1` out in full until then.
 
-## Planned scope
+## Capabilities
 
-- ~~Discovery by UDP broadcast~~ — done; the CLI derives every viable subnet's
-  broadcast address from local interfaces, while repeatable `--broadcast` flags
-  override auto-detection. Fixture-tested and verified on a `192.168.0.0/24`
-  LAN, where flag-free discovery selected `192.168.0.255` and found both bulbs
-- ~~`getPilot` / `setPilot` / `setState` / `getSystemConfig` and friends, as typed
-  requests and responses~~ — done
-- ~~Bulb model parsing: capabilities, scene support and Kelvin range~~ — done
-- ~~A rate-limited streaming path for driving bulbs from live audio or video~~ —
-  done; its 20 Hz default is explicitly a placeholder until hardware benchmarking
-- ~~`syncPilot` push updates~~ — done, with one shared listener and per-MAC
-  subscriptions
+- **Discovery by UDP broadcast** — streamed as bulbs answer, deduplicated by
+  MAC; the CLI derives every viable subnet's broadcast address from local
+  interfaces, with repeatable `--broadcast` overrides
+- **Typed request/response methods** — `getPilot`, `setPilot`, `setState`,
+  `pulse`, `getSystemConfig`, `getModelConfig`, `getUserConfig`, `getPower`,
+  `reboot` and `reset`, with client-side range and mutual-exclusion checks
+- **Bulb model parsing and measured scene tables** — capabilities, Kelvin range
+  and per-class scene availability (39 scenes measured on hardware, plus custom
+  user slots)
+- **Rate-limited streaming path** — `Bulb::stream()` with capacity-one
+  newest-frame coalescing, defaulting to the measured 5 Hz (200 ms) zero-skip
+  optical ceiling
+- **`syncPilot` push listener** — one shared UDP listener on `:38900` with
+  per-MAC subscriptions, automatic 20 s keepalive renewal and post-discovery
+  refresh
 
 **Not planned: RGB ↔ RGB+CW conversion.** A WiZ RGB bulb has five emitters, and
 deciding how to spread a colour across them is a judgement call, not a protocol
@@ -50,11 +55,11 @@ unknowns are collected in [`docs/WIZ_PROTOCOL.md`](docs/WIZ_PROTOCOL.md).
 
 ```toml
 [dependencies]
-wizlight = { version = "0.1.0-beta.1", default-features = false }
+wizlight = { version = "0.1.0-rc.1", default-features = false }
 ```
 
 The prerelease has to be spelled out in full: a plain `"0.1"` requirement does
-not match `0.1.0-beta.1`, and will keep doing nothing until `0.1.0` ships.
+not match `0.1.0-rc.1`, and will keep doing nothing until `0.1.0` ships.
 
 **`default-features = false` matters.** The `cli` feature is on by default so
 that `cargo install wizlight` produces a working binary, and it pulls in `clap`,
@@ -320,13 +325,13 @@ toolchain is not a prerequisite. Substitute the newest tag from the
 count a prerelease as the latest release.
 
 ```console
-$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-beta.1/wizlight-installer.sh | sh
+$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-rc.1/wizlight-installer.sh | sh
 ```
 
 On Windows, in PowerShell:
 
 ```console
-> irm https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-beta.1/wizlight-installer.ps1 | iex
+> irm https://github.com/LucasAmion/wizlight-rs/releases/download/v0.1.0-rc.1/wizlight-installer.ps1 | iex
 ```
 
 Or with Homebrew, on macOS and Linux:
@@ -339,7 +344,7 @@ Or, if you already have [`cargo-binstall`](https://github.com/cargo-bins/cargo-b
 which fetches the same prebuilt archives instead of compiling:
 
 ```console
-$ cargo binstall wizlight --version 0.1.0-beta.1
+$ cargo binstall wizlight --version 0.1.0-rc.1
 ```
 
 Binaries are built for macOS (Apple Silicon and Intel), Linux (x86-64 and
@@ -350,14 +355,14 @@ to the musl one, so it finds these.
 
 From source, with a Rust toolchain, the version has to be spelled out.
 `cargo install` resolves `*`, and `*` does not match a prerelease, so the bare
-form fails outright rather than finding the alpha — the same applies to
+form fails outright rather than finding the prerelease — the same applies to
 `cargo binstall` above, which resolves the version the same way:
 
 ```console
 $ cargo install wizlight
 error: could not find `wizlight` in registry `crates-io` with version `*`
 
-$ cargo install wizlight --version 0.1.0-beta.1
+$ cargo install wizlight --version 0.1.0-rc.1
 ```
 
 Plain `cargo install wizlight` starts working when `0.1.0` ships.
