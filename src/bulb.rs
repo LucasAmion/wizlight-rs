@@ -293,10 +293,11 @@ impl Bulb {
     /// Factory-resets the bulb, unpairing it and clearing its Wi-Fi
     /// credentials. There is no way to undo this over the network.
     ///
-    /// **Never measured, and deliberately not**: finding out what it returns
-    /// costs a bulb that has to be paired again from the app. Given
-    /// [`reboot`](Bulb::reboot) is refused outright on the hardware here, do
-    /// not assume this one works either.
+    /// **Measured on `ESP25_SHRGB_01` fw 1.38.0**: like [`reboot`](Bulb::reboot),
+    /// the bulb refuses `reset` outright with `-32600 Invalid Request` in every
+    /// spelling of `params` (absent, `{}` or `null`), and carries on answering
+    /// without resetting or unpairing. Other models or firmware may still
+    /// honour it, so treat it as destructive.
     ///
     /// Fire and forget, for the reasons on [`reboot`](Bulb::reboot).
     ///
