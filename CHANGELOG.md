@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-11-24
+
 ### Added
 
 - CLI `--stream` global flag: prints discovered bulbs and dispatches `--all`
@@ -506,7 +508,8 @@ is only reachable by asking for `0.1.0-alpha.1` exactly.
   error explaining that.
 
 [light-modes]: https://docs.pro.wizconnected.com/#light-modes
-[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/LucasAmion/wizlight-rs/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.1
 [0.1.0]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0
 [0.1.0-rc.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-rc.1
 [0.1.0-beta.1]: https://github.com/LucasAmion/wizlight-rs/releases/tag/v0.1.0-beta.1
