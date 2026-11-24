@@ -777,7 +777,6 @@ fn init_logging(verbose: u8, json: bool) {
 ///
 /// Returns the process exit code rather than a `Result`, so that the error is
 /// rendered in the requested format instead of by `anyhow`'s `Debug` output.
-#[must_use]
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
     // The rules clap's own derive cannot state, reported the way clap would
